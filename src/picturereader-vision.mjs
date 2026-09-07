@@ -17,6 +17,26 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { contentHasImage } from '@deepseek-ai/dsh-llm';
+import webpWasm from 'webp-wasm';
+// webp-wasm 是 callback API（内部依赖 this=模块对象）。手写 callback→Promise
+// 包装（勿用 util.promisify：其启发式对纯 callback 函数误报 DEP0174 噪音）。
+let decoderReady = false;
+function loadWebpDecoder() {
+  if (decoderReady) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    webpWasm.loadDecoder.call(webpWasm, (err) => {
+      if (err) return reject(err);
+      decoderReady = true;
+      resolve();
+    });
+  });
+}
+function decodeWebp(bytes) {
+  return new Promise((resolve, reject) => {
+    webpWasm.decode.call(webpWasm, bytes, (err, img) => (err ? reject(err) : resolve(img)));
+  });
+}
+import { PNG } from 'pngjs';
 
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 const IMAGE_DIR = join(DSH_HOME, 'picturereader-vision', 'images');
@@ -59,14 +79,30 @@ function applyVisionMeta(model, provider, getConfig) {
   return out;
 }
 
-/** 把图片字节落盘为临时文件，返回路径。 */
+/** 把图片字节落盘为临时文件，返回工具链可读的路径。 */
 async function saveImageBytes(bytes, mediaType) {
   await mkdir(IMAGE_DIR, { recursive: true });
   const hash = createHash('sha1').update(bytes).digest('hex').slice(0, 24);
   const ext = mediaType === 'image/jpeg' ? '.jpg'
-    : mediaType === 'image/webp' ? '.webp'
+    : mediaType === 'image/webp' ? '.png'   // 工具链不支持 webp：落盘转 png
       : mediaType === 'image/gif' ? '.gif' : '.png';
   const path = join(IMAGE_DIR, hash + ext);
+  // dsh 0.1.2 附件归一化常产出 webp（PNG 带 alpha → webp），而本地工具链
+  // （image_scan/OCR）只读 png/jpg/gif/bmp。webp 需转 png 再落盘，否则分析链
+  // 断在格式。用 libwebp→WASM（webp-wasm，纯字节码全平台一致）解码成 RGBA，
+  // 再经项目已有依赖 pngjs 编码为 PNG——零额外原生依赖、零用户操作。
+  if (mediaType === 'image/webp') {
+    try {
+      await loadWebpDecoder();
+      const rgba = await decodeWebp(bytes);
+      const png = new PNG({ width: rgba.width, height: rgba.height });
+      Buffer.from(rgba.data).copy(png.data);
+      await writeFile(path, PNG.sync.write(png), { flag: 'wx' }).catch((e) => { if (e?.code !== 'EEXIST') throw e; });
+      return path;
+    } catch (e) {
+      console.error('[picturereader] webp decode failed, falling back to raw bytes:', e?.message || e);
+    }
+  }
   try { await writeFile(path, bytes, { flag: 'wx' }); } catch (e) { if (e?.code !== 'EEXIST') throw e; }
   return path;
 }
@@ -105,60 +141,128 @@ async function sanitizeImages(ctx, messages) {
  * registration.adapter（避免 DUPLICATE_ADAPTER）。返回注册数；注册者用 ctx.effect
  * 在卸载时恢复原 adapter。
  */
+// 模块级孪生注册状态：wrapped = provider -> 最近一次真实 adapter。
+// registerTwinAdapters 可安全重入（第二次起只刷新包装，不重复注册监听/effect）。
+let twinState = null;
+
+/**
+ * 包装被勾选模型所属 provider 的 adapter（视觉孪生）。
+ * 可安全重复调用：仅在首次注册事件监听与卸载钩子，后续调用（含
+ * refreshTwinAdapters）只做"当前真实 adapter 的检查式重包装"。
+ * @param {import("cordis").Context} ctx
+ * @param {object} llm - 宿主注入的 llm 服务（registration/listProviders 等）。
+ * @param {() => object} getConfig - 读取当前配置（vision_models 等）。
+ * @returns {number} 已包装的 provider 数。
+ */
 export function registerTwinAdapters(ctx, llm, getConfig) {
   if (!llm || !getConfig) return 0;
-  const map = selectedMap(getConfig);
-  const providers = new Set();
-  for (const key of map.keys()) {
-    const prov = key.split('/')[0];
-    if (prov) providers.add(prov);
-  }
-
-  const restores = [];
-  let count = 0;
-  for (const provider of providers) {
-    let reg;
-    try { reg = llm.registration(provider); } catch { continue; }
-    if (!reg || !reg.adapter) continue;
-    const orig = reg.adapter;
-
-    const origList = orig.listModels.bind(orig);
-    const origResolve = orig.resolveModel.bind(orig);
-    const origStream = orig.stream.bind(orig);
-
-    const twin = new Proxy(orig, {
-      get(target, prop, receiver) {
-        if (prop === 'listModels') {
-          return async (p) => (await origList(p)).map((m) => applyVisionMeta(m, p, getConfig));
-        }
-        if (prop === 'resolveModel') {
-          return async (p, m, signal) => applyVisionMeta(await origResolve(p, m, signal), p, getConfig);
-        }
-        if (prop === 'stream') {
-          return async function* (options) {
-            if (options?.messages?.some((msg) => contentHasImage(msg?.content))) {
-              options = { ...options, messages: await sanitizeImages(ctx, options.messages) };
-            }
-            yield* origStream(options);
-          };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
+  if (!twinState) {
+    twinState = { wrapped: new Map() };
+    // 运行时 provider/adapter 变更（添加供应商、插件更新等）会替换 reg.adapter，
+    // 导致既有孪生 proxy 失效（模型名丢失「(视觉)」后缀）。监听
+    // llm/adapters-updated 重新包装，避免依赖 DSH 重启恢复。
+    const onAdaptersUpdated = () => refreshTwinAdapters(ctx, llm, getConfig);
+    ctx.on('llm/adapters-updated', onAdaptersUpdated);
+    // 卸载时恢复：解绑事件 + 各 provider 还原为最近一次的真实 adapter。
+    ctx.effect(() => () => {
+      ctx.off('llm/adapters-updated', onAdaptersUpdated);
+      for (const [provider, orig] of twinState.wrapped) {
+        try {
+          const reg = llm.registration(provider);
+          if (reg) reg.adapter = orig;
+        } catch { /* provider no longer registered; ignore */ }
+      }
+      twinState = null;
     });
-
-    reg.adapter = twin;
-    restores.push({ reg, orig });
-    count++;
   }
+  return refreshTwinAdapters(ctx, llm, getConfig);
+}
 
-  if (count > 0) console.log(`[picturereader] vision twin active on provider(s): ${[...providers].join(', ')}`);
+/**
+ * 检查式刷新孪生包装（可随时调用，幂等）：
+ * - 当前 reg.adapter 已是我们 proxy → 跳过（防套娃）；
+ * - 否则取其真实 adapter 重新包装（覆盖 DSH 替换 adapter 的场景）。
+ * 供 registerTwinAdapters 重入、llm/adapters-updated 事件与设置热更新（scope.watch）调用。
+ * @param {object} llm
+ * @param {() => object} getConfig
+ * @returns {number} 当前已包装的 provider 数。
+ */
+export function refreshTwinAdapters(ctx, llm, getConfig) {
+  if (!twinState || !llm || !getConfig) return 0;
+  const map = selectedMap(getConfig);
+  for (const key of map.keys()) wrapProvider(twinState, ctx, llm, key.split('/')[0], getConfig);
+  return twinState.wrapped.size;
+}
 
-  if (restores.length > 0) {
-    ctx.effect(
-      () => () => { for (const { reg, orig } of restores) reg.adapter = orig; },
-      'picturereader: vision twin restore',
-    );
-  }
-  return count;
+/** 若 provider 当前 adapter 尚未被包装（非孪生 proxy），则包装之。 */
+function wrapProvider(state, ctx, llm, provider, getConfig) {
+  let reg;
+  try { reg = llm.registration(provider); } catch { return; }
+  if (!reg || !reg.adapter) return;
+  // dsh-llm 在 provider/adapter 变更时替换 reg.adapter；若当前值已是本插件的
+  // 孪生 proxy 则跳过（防嵌套），否则取真实 adapter 重新包装。
+  if (reg.adapter?.__picturereaderTwin) return;
+  const orig = reg.adapter;
+  state.wrapped.set(provider, orig);
+
+  const origList = orig.listModels.bind(orig);
+  const origResolve = orig.resolveModel.bind(orig);
+  const origPrepare = typeof orig.prepareCall === 'function' ? orig.prepareCall.bind(orig) : null;
+  const origStream = orig.stream.bind(orig);
+
+  const twin = new Proxy(orig, {
+    get(target, prop, receiver) {
+      if (prop === '__picturereaderTwin') return true;
+      if (prop === 'listModels') {
+        return async (p) => (await origList(p)).map((m) => applyVisionMeta(m, p, getConfig));
+      }
+      if (prop === 'resolveModel') {
+        return async (p, m, signal) => applyVisionMeta(await origResolve(p, m, signal), p, getConfig);
+      }
+      if (prop === 'prepareCall' && origPrepare) {
+        // dsh-llm 的能力判定与流调度都走 prepareCall 返回的对象：
+        //   model.inputModalities -> 图片能力判定（缺则图片被省略）
+        //   stream               -> 实际流入口（缺图片拦截则 pi-ai 报
+        //                            "does not support image input"）
+        // 两个都必须包装：注入视觉元数据 + 拦截图片转本地分析文本。
+        return async (p, m, signal) => {
+          const result = await origPrepare(p, m, signal);
+          if (result && result.model) result.model = applyVisionMeta(result.model, p, getConfig);
+          if (result && typeof result.stream === 'function') {
+            const preparedStream = result.stream.bind(result);
+            // 必须是异步生成器：dsh-llm 对 stream() 的返回值做 for await
+            // （要求 [Symbol.asyncIterator]）；async 函数返回 Promise 会崩。
+            result.stream = async function* (options) {
+              if (options?.messages?.some((msg) => contentHasImage(msg?.content))) {
+                // 防御：图片分析失败时原样放行，绝不让流中断污染会话
+                try {
+                  options = { ...options, messages: await sanitizeImages(ctx, options.messages) };
+                } catch (e) {
+                  console.error('[picturereader] sanitizeImages failed, forwarding original messages:', e?.message || e);
+                }
+              }
+              yield* preparedStream(options);
+            };
+          }
+          return result;
+        };
+      }
+      if (prop === 'stream') {
+        return async function* (options) {
+          if (options?.messages?.some((msg) => contentHasImage(msg?.content))) {
+            try {
+              options = { ...options, messages: await sanitizeImages(ctx, options.messages) };
+            } catch (e) {
+              console.error('[picturereader] sanitizeImages failed, forwarding original messages:', e?.message || e);
+            }
+          }
+          yield* origStream(options);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+
+  reg.adapter = twin;
 }

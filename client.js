@@ -259,22 +259,19 @@ window.__ModuleLoader__.load({
       var editingRef = react.useRef(false);
       var editTimerRef = react.useRef(null);
 
-      // Sync selected from scope: subscribe + load on mount
+      // Sync selected from scope: read on mount + react to external changes
+      // (e.g. after the save button writes vision_models). Local edits stay in
+      // draft (via props.onDraft) until the save button commits them.
       react.useEffect(function () {
         var alive = true;
-        var lastSavedRef = null; // Track last saved value to prevent overwrite
         function syncFromScope() {
           if (!alive) return;
           var snap = scope.getSnapshot();
           if (snap.status === "ready" && snap.value) {
             var sel = snap.value.vision_models;
             if (Array.isArray(sel)) {
-              // If we just saved and the value matches what we saved, skip
-              if (lastSavedRef && JSON.stringify(sel) === JSON.stringify(lastSavedRef)) {
-                lastSavedRef = null;
-                return;
-              }
               setSelected(sel);
+              if (props.onDraft) props.onDraft(sel);
             }
           }
         }
@@ -291,12 +288,9 @@ window.__ModuleLoader__.load({
         var unsubscribe = typeof scope.subscribe === "function" ? scope.subscribe(function () {
           if (alive) syncFromScope();
         }) : null;
-        // Expose lastSavedRef for saveSelection
-        VisionBridgePicker._lastSavedRef = function(val) { lastSavedRef = val; };
         return function () {
           alive = false;
           if (unsubscribe) unsubscribe();
-          VisionBridgePicker._lastSavedRef = null;
         };
       }, [scope]);
 
@@ -335,7 +329,7 @@ window.__ModuleLoader__.load({
           next = selected.concat([{ id: model.id, provider: model.provider, note: "" }]);
         }
         setSelected(next);
-        saveSelection(next);
+        if (props.onDraft) props.onDraft(next);
       }
 
       // Update note for a selected model
@@ -346,18 +340,7 @@ window.__ModuleLoader__.load({
           return m;
         });
         setSelected(next);
-        saveSelection(next);
-      }
-
-      function saveSelection(list) {
-        console.log('[picturereader] saveSelection called with', list.length, 'models:', JSON.stringify(list.map(function(m) { return m.id; })));
-        // Track last saved value to prevent scope sync from overwriting
-        if (VisionBridgePicker._lastSavedRef) VisionBridgePicker._lastSavedRef(list);
-        scope.set("vision_models", list).then(function () {
-          console.log('[picturereader] vision_models saved successfully');
-        }).catch(function (err) {
-          console.error('[picturereader] vision_models save failed:', err);
-        });
+        if (props.onDraft) props.onDraft(next);
       }
 
       var isSelected = function (m) {
@@ -416,7 +399,10 @@ window.__ModuleLoader__.load({
         var alive = true;
         var sync = function () { if (alive) setSnapshot(scope.getSnapshot()); };
         var un = typeof scope.subscribe === "function" ? scope.subscribe(sync) : null;
-        return function () { alive = false; if (un) un(); if (scope.dispose) scope.dispose(); };
+        // 注意：卸载时只退订、不 dispose scope——scope 属于插件 fiber 生命周期
+        // （apply 时 bind），组件卸载销毁它会令"关闭设置页再重开"后写失效
+        // （0.1.2 scope 有 dispose 后触发该回归）。
+        return function () { alive = false; if (un) un(); };
       }, [scope]);
       react.useEffect(function () {
         // Fill the draft from the resolved value once, but never overwrite keys
@@ -494,6 +480,16 @@ window.__ModuleLoader__.load({
           if (str.trim() === "") { ops.push({ op: "unset", key: f.key }); return; }
           ops.push({ op: "set", key: f.key, value: str });
         });
+        // vision_models：由 VisionBridgePicker 的草稿（draft["vision_models"]）驱动，
+        // 点保存才提交——空列表走 unset（回落 schema 默认 []），非空走 set。
+        if (draft["vision_models"] !== void 0) {
+          var vm = draft["vision_models"];
+          if (Array.isArray(vm) && vm.length === 0) {
+            ops.push({ op: "unset", key: "vision_models" });
+          } else {
+            ops.push({ op: "set", key: "vision_models", value: vm });
+          }
+        }
         var writes = ops.map(function (o) {
           return o.op === "set" ? scope.set(o.key, o.value) : scope.unset(o.key);
         });
@@ -593,7 +589,7 @@ window.__ModuleLoader__.load({
         h("div", { className: "__pr_card" },
           h("h3", { className: "__pr_cardTitle" }, t("visionBridgeModels")),
           h("p", { className: "__pr_subHint" }, t("visionBridgeModelsHint")),
-          h(VisionBridgePicker, { t: t, scope: scope })
+          h(VisionBridgePicker, { t: t, scope: scope, onDraft: function (v) { setDraft(function (prev) { var n = Object.assign({}, prev); n["vision_models"] = v; return n; }); } })
         ),
         // 外部视觉 API
         h("div", { className: "__pr_card" },

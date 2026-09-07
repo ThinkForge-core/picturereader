@@ -31,10 +31,9 @@ import { createDocumentToImageTool } from './doc-tools.js';
 import { createImageEditTool } from './image-edit.js';
 import { NS } from './config.js';
 import z from '@deepseek-ai/schemastery';
-import { ensureSettingsNamespaceExposed } from './settings-expose.js';
 import { setRuntimeSource, getRuntimeConfig } from './runtime.js';
 import { attachImageBridge } from './bridge.js';
-import { registerTwinAdapters } from './picturereader-vision.mjs';
+import { registerTwinAdapters, refreshTwinAdapters } from './picturereader-vision.mjs';
 import { writeFile, readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -270,13 +269,7 @@ export const inject = ['tools', 'fs', 'llm', 'attachments'];
 export function apply(ctx, config) {
   // 内核 0.1.2 起 settings-controller 的 describe() 原生枚举全部注册命名空间
   // （rc.2 时代 dsh-host-apiproxy 的 WEB_SETTINGS_NAMESPACES 白名单连同整个
-  // apiproxy 包已被移除），本补丁退役；调用注释保留作老内核回退参考。
-  // try {
-  //   ensureSettingsNamespaceExposed(ctx, NS, ctx.logger);
-  // } catch (error) {
-  //   ctx.logger?.warn?.(`[picturereader] settings-expose failed: ${String(error)}`);
-  // }
-
+  // apiproxy 包已被移除），本补丁退役；调用已删除（原 ensureSettingsNamespaceExposed）。
   // ── 运行时快照：工具执行时惰性读最新 mode / VLM 配置 ──
   let sourceGetter = null;
   const getConfig = () => (sourceGetter ? sourceGetter() : config);
@@ -339,12 +332,12 @@ export function apply(ctx, config) {
   // ── 设置命名空间 + 模型扫描 + 视觉孪生路由（需要 settings 和 llm 服务）──
   ctx.inject(['settings', 'llm'], (sctx) => {
     const llm = sctx.llm;
-    // 内核 0.1.3 起 dsh-settings 不再导出 settingsNamespace 品牌函数
+    // 内核 0.1.2+ 起 dsh-settings 不再导出 settingsNamespace 品牌函数
     // （命名空间校验收进 register() 内部，见内核 parseSettingsNamespace）。
     // 直接把裸 NS 交给 register 即可，返回的 scope 仍具备 get/watch/update/replace。
     const scope = sctx.settings.register(NS, Config, { base: config });
     sourceGetter = () => scope.get();
-    scope.watch(() => { /* 触发热更 */ });
+    scope.watch(() => { refreshTwinAdapters(ctx, llm, getConfig); /* 勾选模型热更新孪生包装 */ });
 
     // ── 扫描所有 provider 的文本模型 → 写入 available_text_models ──
     (async () => {
