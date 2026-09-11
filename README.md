@@ -411,11 +411,15 @@ await main()
 
 ### v3.3.3（本次）
 
-- **适配 dsh 0.1.3-alpha.1 / dsheac 5.4.0 的 settings 命名空间 API 变更（关键修复）**：内核 0.1.3 起 `@deepseek-ai/dsh-settings` 只导出 `SettingsConflictError` / `SettingsProvider` / `redactSecrets`，`settingsNamespace()` 品牌函数被移除（命名空间校验收进 `register()` 内部，见内核 `parseSettingsNamespace`）。原先 `import { settingsNamespace } from '@deepseek-ai/dsh-settings'` 在 ESM 静态解析阶段即失败，导致插件模块加载失败、整棵插件树崩溃 —— 在 EAC 上表现为更新后「一对话就报错」并触发 guard 安全模式（插件行被大范围剥离）。现改为把裸 `NS` 直接交给 `sctx.settings.register(NS, Config, { base: config })`，`register()` 自行完成命名空间校验，返回的 scope 仍具备 `get / watch / update / replace`，行为不变。
-- **`peerDependencies` 补上 0.1.3 线**：`^0.1.0-rc.6 || ^0.1.1-rc.2 || ^0.1.3-alpha.1`（`@deepseek-ai/dsh-settings` 与 `@deepseek-ai/dsh-llm`），避免新环境安装时被旧的版本区间误导。
+- **适配 dsh 0.1.2 / 0.1.3 的破坏性变更（关键修复，含 @FreyHsia 贡献）**：
+  - **settings 命名空间 API**：内核移除 `settingsNamespace()` 导出（校验收进 `register()` 内部，见内核 `parseSettingsNamespace`），原先顶层 `import { settingsNamespace } from '@deepseek-ai/dsh-settings'` 在 ESM 链接期即失败 —— 模块整体加载失败会拖垮整棵插件树，在 EAC 上表现为「一对话就报错」并触发 guard 安全模式（配套插件行被大范围剥离）。现改为把裸 `NS` 直接交给 `sctx.settings.register(NS, Config, { base: config })`，返回的 scope 仍具备 `get / watch / update / replace`，行为不变。
+  - **设置页重新打开后写入失效（0.1.2+ 回归）**：卸载时**只退订、不 `dispose()` scope** —— scope 属于插件 fiber 生命周期，组件卸载销毁它会导致关闭设置页再打开后所有写入静默失败、必须重启 DSH 才能改设置。
+  - **视觉孪生链路**：适配 `dsh-llm` 的流调度变更（`prepareCall(...).stream`，不再走 `adapter.stream`），并在设置变更时 `refreshTwinAdapters()` 热更新孪生包装，避免「勾选模型后仍需重启」。
+  - **WebP 附件可分析**：`dsh-attachment` 会把带 alpha 的 PNG 归一化为 WebP，而本地工具链只读 png/jpg/gif/bmp —— 现以 `webp-wasm`（纯 WASM，全平台零安装）解码 + `pngjs` 落盘转为 PNG，分析链不再因格式中断。
+  - **设置页模型勾选交互**：`vision_models` 改为草稿态由「保存」按钮统一提交（空列表走 `unset` 回落 schema 默认），不再在每次勾选时立即写盘。
+- **`peerDependencies` 补齐 0.1.2 / 0.1.3 线**：`^0.1.0-rc.6 || ^0.1.1-rc.2 || ^0.1.2-rc.1 || ^0.1.3-alpha.1`（`@deepseek-ai/dsh-settings` 与 `@deepseek-ai/dsh-llm`），避免新环境安装时被旧的版本区间误导。
 - 逐项复核其余 `@deepseek-ai/*` 导入：`contentHasImage`（`dsh-llm`）与 `schemastery` 默认导出在 0.1.3 上均仍存在，无需改动。
 - 兼容性保持不变：0.1.1-rc.2 / dsheac 5.1.0 及更早内核下行为与 v3.3.2 一致。
-
 ### v3.3.2
 
 - **修复文本模型附件降级链路**：当模型入口将图片改写为 `[image omitted ...; attachment sha256:…]` 时，图片桥会在本地附件对象库中按 SHA 前缀查找唯一对象，验证 PNG/JPEG/GIF/BMP/WebP 文件头后导出并注入 `image_scan` / `image_ocr` 引导；找不到、前缀歧义或非图片对象时保持原文本，不猜测路径。
