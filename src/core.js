@@ -4,9 +4,11 @@
  * The plugin loads this module dynamically with a cache-busting query on every
  * tool execution (see `importCore` in tool.js), so edits to this file take
  * effect on the next `image_scan` call WITHOUT a process restart. That only
- * works because this module has no relative imports of its own source files:
- * the only static dependencies are stable npm packages (pngjs / jpeg-js /
- * omggif), which Node keeps cached.
+ * works because this module has no relative imports of mutable business logic:
+ * the dependencies are stable npm packages (pngjs / jpeg-js / omggif) plus the
+ * path resolver `./paths.js`, which is infrastructure that resolves the
+ * installer state file lazily on every call. Editing `paths.js` itself needs a
+ * DSH restart; editing this file does not.
  *
  * Everything is pure JS, no native dependencies:
  * - decoding: PNG (pngjs), JPEG (jpeg-js), GIF first frame (omggif), BMP (built-in)
@@ -14,8 +16,8 @@
  *   achromatic gate so dark grays never misclassify as brown
  * - pipeline: region crop, aspect-fit downscale, per-cell average + saturated
  *   "accent" color (keeps thin colored lines visible), luminance/color grids
- * - OCR: Windows.Media.Ocr via a spawned PowerShell (built into Windows 10+,
- *   local, no install; Chinese needs the language pack)
+ * - OCR: PaddleOCR through the installer-managed `paddle` venv (local, CPU,
+ *   no external service — the engines are downloaded once into the model cache)
  * @module picturereader/core
  */
 
@@ -24,9 +26,12 @@ import * as jpeg from 'jpeg-js';
 import { GifReader } from 'omggif';
 import { spawn } from 'node:child_process';
 import { writeFile, rm, stat } from 'node:fs/promises';
-import { tmpdir, release, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { paddlePython, paddleCacheHome, installHint } from './paths.js';
+
+export { paddlePython, paddleCacheHome };
 
 // ---------------------------------------------------------------------------
 // palette
@@ -958,7 +963,7 @@ export function renderImageScan(value) {
 }
 
 // ---------------------------------------------------------------------------
-// crop + PNG encode + OCR (Windows.Media.Ocr via PowerShell)
+// crop + PNG encode + OCR (PaddleOCR via the installer-managed paddle venv)
 // ---------------------------------------------------------------------------
 
 /**
@@ -992,173 +997,87 @@ export function encodePng(rgba, width, height) {
 }
 
 /**
- * Build the PowerShell command that runs Windows.Media.Ocr on a PNG file and
- * emits a UTF-8 JSON payload as base64 on stdout.
- * @param pngPath - absolute path to the PNG to recognize.
- * @param language - optional BCP-47 tag (e.g. 'zh-Hans'); defaults to the user's languages.
- * @returns the PowerShell command string (joined statements).
+ * Every `lang` value PaddleOCR 3.x accepts.
+ *
+ * PaddleOCR 3.x takes a **language**, not the group name that PaddleOCR 2.x
+ * used: `lang='ru'` works while `lang='cyrillic'` fails with "No models are
+ * available for lang='cyrillic'". Several languages share one recognition
+ * model — all Cyrillic-script languages resolve to the cyrillic model, the
+ * East Slavic ones (`ru`, `uk`, `be`) to the eslav model, and most Latin-script
+ * languages to the latin model — but the value passed in is always the language
+ * itself. This set mirrors the unions PaddleOCR dispatches on, so anything
+ * accepted here resolves to a real model.
  */
-export function buildOcrCommand(pngPath, language) {
-  const esc = (s) => String(s).replaceAll("'", "''");
-  const engineLine =
-    language === undefined
-      ? '$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()'
-      : `$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('${esc(language)}'))`;
-  return [
-    'Add-Type -AssemblyName System.Runtime.WindowsRuntime',
-    '$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]',
-    '$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]',
-    '$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime]',
-    "$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]",
-    'Function Await($WinRtTask, $ResultType) {',
-    '  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)',
-    '  $netTask = $asTask.Invoke($null, @($WinRtTask))',
-    '  $netTask.Wait(-1) | Out-Null',
-    '  $netTask.Result',
-    '}',
-    `$path = '${esc(pngPath)}'`,
-    '$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($path)) ([Windows.Storage.StorageFile])',
-    '$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])',
-    '$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])',
-    '$bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])',
-    engineLine,
-    "if ($engine -eq $null) { Write-Error 'no OCR engine for the requested language'; exit 2 }",
-    '$result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])',
-    '$lines = @()',
-    'foreach ($line in $result.Lines) {',
-    '  $words = @()',
-    '  foreach ($w in $line.Words) {',
-    '    $words += [PSCustomObject]@{ Text = $w.Text; X = [int]$w.BoundingRect.X; Y = [int]$w.BoundingRect.Y; W = [int]$w.BoundingRect.Width; H = [int]$w.BoundingRect.Height }',
-    '  }',
-    '  $lines += [PSCustomObject]@{ Text = $line.Text; X = [int]$line.BoundingRect.X; Y = [int]$line.BoundingRect.Y; W = [int]$line.BoundingRect.Width; H = [int]$line.BoundingRect.Height; Words = $words }',
-    '}',
-    '$json = [PSCustomObject]@{ Width = $decoder.PixelWidth; Height = $decoder.PixelHeight; Lines = $lines } | ConvertTo-Json -Depth 5',
-    '[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))'
-  ].join('; ');
+const PADDLE_LANGS = new Set([
+  // languages with a dedicated model
+  'ch', 'chinese_cht', 'en', 'japan', 'korean', 'th', 'el', 'te', 'ta', 'ka',
+  // latin script
+  'af', 'az', 'bs', 'ca', 'cs', 'cy', 'da', 'de', 'es', 'et', 'eu', 'fi', 'fr',
+  'ga', 'gl', 'hr', 'hu', 'id', 'is', 'it', 'ku', 'la', 'lb', 'lt', 'lv', 'mi',
+  'ms', 'mt', 'nl', 'no', 'oc', 'pi', 'pl', 'pt', 'qu', 'rm', 'ro', 'rs_latin',
+  'sk', 'sl', 'sq', 'sv', 'sw', 'tl', 'tr', 'uz', 'vi',
+  // arabic script
+  'ar', 'bal', 'fa', 'ps', 'sd', 'ug', 'ur',
+  // cyrillic script (ru/uk/be belong to the dedicated eslav model)
+  'abq', 'ady', 'ava', 'ba', 'be', 'bg', 'bua', 'che', 'cv', 'dar', 'inh',
+  'kaa', 'kbd', 'kk', 'kv', 'ky', 'lbe', 'lez', 'mhr', 'mk', 'mn', 'mo', 'os',
+  'rs_cyrillic', 'ru', 'sah', 'tab', 'tg', 'tt', 'tyv', 'udm', 'uk', 'xal',
+  // devanagari script
+  'ang', 'bgc', 'bh', 'bho', 'gom', 'hi', 'mah', 'mai', 'mr', 'ne', 'new', 'sa', 'sck'
+]);
+
+/** BCP-47 tags whose PaddleOCR code differs from the primary subtag. */
+const PADDLE_LANG_ALIASES = new Map([
+  ['zh', 'ch'],
+  ['ja', 'japan'],
+  ['ko', 'korean'],
+  // Serbian is written in both scripts; the Cyrillic model is the safer default.
+  ['sr', 'rs_cyrillic'],
+  // PaddleOCR also accepts the English language names as aliases.
+  ['french', 'fr'],
+  ['german', 'de']
+]);
+
+/** Default PaddleOCR recognition model (covers Chinese, English and Japanese). */
+export const PADDLE_DEFAULT_LANG = 'ch';
+
+/**
+ * Map a BCP-47 language tag onto a PaddleOCR language code.
+ *
+ * Russian is the reason this exists: the default `ch` model does not read
+ * Cyrillic at all, so `language="ru"` (or the `ocr_language` setting) has to
+ * select the eslav model. An unknown, empty or missing tag falls back to the
+ * default rather than failing the call.
+ *
+ * @param {string|undefined} language - BCP-47 tag such as `ru`, `en-US`, `zh-Hant`.
+ * @returns {string} a PaddleOCR language code (`ch`, `en`, `ru`, `de`, ...).
+ */
+export function paddleLangFor(language) {
+  if (language === undefined || language === null) return PADDLE_DEFAULT_LANG;
+  const raw = String(language).trim().toLowerCase();
+  if (raw === '') return PADDLE_DEFAULT_LANG;
+
+  // Traditional Chinese is the one script split that needs the full tag.
+  if (/^zh\b/.test(raw) && /-(hant|tw|hk|mo)\b/.test(raw)) return 'chinese_cht';
+
+  if (PADDLE_LANG_ALIASES.has(raw)) return PADDLE_LANG_ALIASES.get(raw);
+  if (PADDLE_LANGS.has(raw)) return raw;
+
+  const primary = raw.split(/[-_]/)[0];
+  if (PADDLE_LANG_ALIASES.has(primary)) return PADDLE_LANG_ALIASES.get(primary);
+  if (PADDLE_LANGS.has(primary)) return primary;
+  return PADDLE_DEFAULT_LANG;
 }
 
 /**
- * Run Windows OCR on a PNG file and parse the result.
- * @param pngPath - absolute path to the PNG.
- * @param options - `{ language }`.
- * @returns `{ width, height, lines }` where each line is
- *   `{ text, x, y, width, height }` (pixel box aggregated from its words).
- */
-export function runOcr(pngPath, { language } = {}) {
-  const command = buildOcrCommand(pngPath, language);
-  return new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { windowsHide: true });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error('image_ocr: OCR timed out after 30s'));
-    }, 30_000);
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(new Error(`image_ocr: cannot start OCR engine: ${error.message}`));
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(`image_ocr: OCR engine failed (exit ${code}): ${stderr.trim().slice(0, 300)}`));
-        return;
-      }
-      try {
-        const json = Buffer.from(stdout.trim(), 'base64').toString('utf8');
-        const parsed = JSON.parse(json);
-        const lines = (parsed.Lines ?? []).map((line) => {
-          let minX = Infinity;
-          let minY = Infinity;
-          let maxRight = -Infinity;
-          let maxBottom = -Infinity;
-          for (const word of line.Words ?? []) {
-            minX = Math.min(minX, word.X);
-            minY = Math.min(minY, word.Y);
-            maxRight = Math.max(maxRight, word.X + word.W);
-            maxBottom = Math.max(maxBottom, word.Y + word.H);
-          }
-          return {
-            text: line.Text,
-            x: minX === Infinity ? 0 : minX,
-            y: minY === Infinity ? 0 : minY,
-            width: maxRight === -Infinity ? 0 : maxRight - minX,
-            height: maxBottom === -Infinity ? 0 : maxBottom - minY
-          };
-        });
-        resolve({ width: parsed.Width, height: parsed.Height, lines });
-      } catch (error) {
-        reject(new Error(`image_ocr: cannot parse OCR result: ${error.message}`));
-      }
-    });
-  });
-}
-
-/**
- * Full OCR pipeline: decode -> optional region crop -> PNG temp file ->
- * OCR engine -> cleanup. Returns recognized text lines with pixel boxes.
- * @param buffer - raw image bytes.
- * @param ext - lowercase extension ('.png' etc.).
- * @param options - `{ region, language, engine }`. engine: 'windows'
- *   (Windows.Media.Ocr, default), 'paddle' (PaddleOCR via the local
- *   paddle_venv) or 'rapid' (RapidOCR via the local rapid_venv) — Paddle and
- *   Rapid are far better at glowing/curved/game-rendered text.
- * @returns `{ width, height, lines }`.
- */
-export async function ocrImage(buffer, ext, { region, language, engine = 'windows' } = {}) {
-  const image = decodeImage(buffer, ext);
-  let work = image;
-  if (region !== undefined) {
-    const cropped = cropRgba(image.data, image.width, image.height, normalizeRegion(region));
-    work = cropped;
-  }
-  const pngBytes = encodePng(work.data, work.width, work.height);
-  // WSL compat: powershell.exe (Windows OCR) cannot reach a WSL /tmp path and
-  // GetFileFromPathAsync rejects forward slashes — write the temp PNG under
-  // /mnt/c/Windows/Temp and hand Windows a backslash path.
-  const isWsl = process.platform === 'linux' && /microsoft/i.test(release());
-  const tmpBase = isWsl ? '/mnt/c/Windows/Temp' : tmpdir();
-  const tmpName = `picturereader-ocr-${randomBytes(6).toString('hex')}.png`;
-  const tmpPath = join(tmpBase, tmpName);
-  const winPath = isWsl ? `C:\\Windows\\Temp\\${tmpName}` : tmpPath;
-  await writeFile(tmpPath, pngBytes);
-  try {
-    if (engine === 'paddle') {
-      const result = await runPaddleOcr(tmpPath);
-      return { width: work.width, height: work.height, lines: result.lines };
-    }
-    if (engine === 'rapid') {
-      const result = await runRapidOcr(tmpPath);
-      return { width: work.width, height: work.height, lines: result.lines };
-    }
-    if (engine === 'macos') {
-      const result = await runMacOcr(tmpPath, language);
-      return { width: work.width, height: work.height, lines: result.lines };
-    }
-    return await runOcr(winPath, { language });
-  } finally {
-    await rm(tmpPath, { force: true }).catch(() => {});
-  }
-}
-
-/** Absolute path to the local PaddleOCR environment (paddle_venv); overridable via DSH_PADDLE_PYTHON. */
-export function paddlePython() {
-  return process.env.DSH_PADDLE_PYTHON ?? 'C:/Users/Administrator/paddle_venv/Scripts/python.exe';
-}
-/** PaddleX model cache; overridable via DSH_PADDLE_CACHE. Default: user home
- *  (previous default was a hard-coded author machine path). */
-export function paddleCacheHome() {
-  return process.env.DSH_PADDLE_CACHE ?? join(homedir(), '.paddlex-cache');
-}
-
-/**
- * Whether the optional PaddleOCR environment is available. PaddleOCR is an
- * OPTIONAL engine: when it is missing, callers must degrade gracefully to the
- * Windows engine instead of failing.
- * @param python - python executable to probe (defaults to the configured path).
- * @returns true when the interpreter exists.
+ * Whether the PaddleOCR environment is present.
+ *
+ * PaddleOCR is the only OCR engine the plugin ships, so a missing
+ * environment means `image_ocr` cannot run at all — callers use this to
+ * produce the "run the installer" hint instead of a raw ENOENT.
+ *
+ * @param python - interpreter to probe (defaults to the configured path).
+ * @returns true when the interpreter exists on disk.
  */
 export async function paddleAvailable(python = paddlePython()) {
   try {
@@ -1170,18 +1089,23 @@ export async function paddleAvailable(python = paddlePython()) {
 }
 
 /**
- * Run PaddleOCR on a PNG file via the local paddle_venv. Strongly better than
- * Windows OCR for glowing, curved, or game-rendered text (verified on the
- * ENDFIELD "勇于探索叩问苍穹" banner). Model load takes ~2s per call.
- * @param pngPath - absolute path to the PNG.
+ * Run PaddleOCR on a PNG file through the installer-managed `paddle` venv.
+ *
+ * A short script is handed to the interpreter with `-c`; it prints the
+ * recognized lines as base64-encoded JSON on stdout, which keeps the wire
+ * format safe against stray prints from model loading.
+ *
+ * @param pngPath - absolute path to the PNG to recognize.
+ * @param options - `{ language }`, a BCP-47 tag mapped via {@link paddleLangFor}.
  * @returns `{ lines: [{ text, score, x, y, width, height }] }` (box aggregated).
  */
-export function runPaddleOcr(pngPath) {
+export function runPaddleOcr(pngPath, { language } = {}) {
   const escaped = String(pngPath).replaceAll("'", "''");
+  const lang = paddleLangFor(language);
   const script = [
     'import base64, json, sys',
     'from paddleocr import PaddleOCR',
-    "ocr = PaddleOCR(lang='ch', use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False, enable_mkldnn=False)",
+    `ocr = PaddleOCR(lang='${lang}', use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False, enable_mkldnn=False)`,
     `result = ocr.predict(r'${escaped}')`,
     'lines = []',
     'for res in result:',
@@ -1202,8 +1126,7 @@ export function runPaddleOcr(pngPath) {
   ].join('\n');
   return new Promise((resolve, reject) => {
     const child = spawn(paddlePython(), ['-c', script], {
-      env: { ...process.env, PADDLE_PDX_CACHE_HOME: paddleCacheHome(), PYTHONIOENCODING: 'utf-8' },
-      windowsHide: true
+      env: { ...process.env, PADDLE_PDX_CACHE_HOME: paddleCacheHome(), PYTHONIOENCODING: 'utf-8' }
     });
     let stdout = '';
     let stderr = '';
@@ -1215,6 +1138,10 @@ export function runPaddleOcr(pngPath) {
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', (error) => {
       clearTimeout(timer);
+      if (error.code === 'ENOENT') {
+        reject(new Error(`image_ocr: PaddleOCR interpreter not found at ${paddlePython()} — ${installHint()}`));
+        return;
+      }
       reject(new Error(`image_ocr: cannot start PaddleOCR: ${error.message}`));
     });
     child.on('close', (code) => {
@@ -1224,9 +1151,9 @@ export function runPaddleOcr(pngPath) {
         reject(new Error(`image_ocr: PaddleOCR failed (exit ${code}): ${tail}`));
         return;
       }
-      // 首次下载模型时 AI Studio 源可能把 `<Response [404]>` 之类的调试行
-      // 打到 stdout（aistudio_sdk 缺陷），污染 base64。防御：只取合法
-      // base64 行再拼接解码（issue #2 Bug 1）。
+      // The first run downloads recognition models, and the download source can
+      // print stray debug lines such as `<Response [404]>` on stdout, which
+      // would corrupt the base64 payload. Keep only well-formed base64 lines.
       const b64 = stdout.split('\n').map((l) => l.trim()).filter((l) => l && /^[A-Za-z0-9+/=]+$/.test(l)).join('');
       if (!b64) {
         reject(new Error('image_ocr: PaddleOCR produced no base64 output (tail: ' + stdout.trim().split('\n').slice(-3).join(' | ').slice(0, 200) + ')'));
@@ -1243,155 +1170,31 @@ export function runPaddleOcr(pngPath) {
   });
 }
 
-/** Absolute path to the local RapidOCR environment (rapid_venv); overridable via DSH_RAPID_PYTHON. */
-export function rapidPython() {
-  return process.env.DSH_RAPID_PYTHON ?? 'C:/Users/Administrator/rapid_venv/Scripts/python.exe';
-}
-
 /**
- * Whether the optional RapidOCR environment is available. RapidOCR is an
- * OPTIONAL engine: when it is missing, callers must degrade gracefully to the
- * Windows engine instead of failing.
- * @param python - python executable to probe (defaults to the configured path).
- * @returns true when the interpreter exists AND `rapidocr_onnxruntime` imports.
+ * Full OCR pipeline: decode -> optional region crop -> PNG temp file ->
+ * PaddleOCR -> cleanup. Returns recognized text lines with pixel boxes.
+ *
+ * @param buffer - raw image bytes.
+ * @param ext - lowercase extension ('.png' etc.).
+ * @param options - `{ region, language }`.
+ * @returns `{ width, height, lines }`.
  */
-export async function rapidAvailable(python = rapidPython()) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(ok);
-    };
-    const child = spawn(python, ['-c', 'import rapidocr_onnxruntime'], {
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-      windowsHide: true,
-      stdio: 'ignore'
-    });
-    const timer = setTimeout(() => { child.kill(); finish(false); }, 30_000);
-    child.on('error', () => finish(false));
-    child.on('close', (code) => finish(code === 0));
-  });
-}
-
-/**
- * Run RapidOCR on a PNG file via the local rapid_venv. Uses the bundled
- * det/rec/cls ONNX models (no network download on first run — verified on
- * rapidocr_onnxruntime 1.2.3). Better than Windows OCR for glowing, curved,
- * or game-rendered text.
- * @param pngPath - absolute path to the PNG (forward slashes recommended).
- * @returns `{ lines: [{ text, score, x, y, width, height }] }` (box aggregated).
- */
-export function runRapidOcr(pngPath) {
-  const script = [
-    'import json, sys',
-    'from rapidocr_onnxruntime import RapidOCR',
-    '_engine = RapidOCR()',
-    '_result, _elapse = _engine(sys.argv[1])',
-    '_out = []',
-    'for _it in (_result or []):',
-    '    _pts = [[float(c) for c in _p] for _p in _it[0]]',
-    '    _xs = [_p[0] for _p in _pts]; _ys = [_p[1] for _p in _pts]',
-    "    _out.append({'text': _it[1], 'score': float(_it[2]), 'x': int(min(_xs)), 'y': int(min(_ys)), 'width': int(max(_xs)-min(_xs)), 'height': int(max(_ys)-min(_ys))})",
-    "print(json.dumps({'lines': _out}, ensure_ascii=False), flush=True)"
-  ].join('\n');
-  return new Promise((resolve, reject) => {
-    const child = spawn(rapidPython(), ['-c', script, String(pngPath)], {
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-      windowsHide: true
-    });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error('image_ocr: RapidOCR timed out after 60s'));
-    }, 60_000);
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(new Error(`image_ocr: cannot start RapidOCR: ${error.message}`));
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        const tail = stderr.trim().split('\n').filter((l) => l.includes('Error') || l.includes('error') || l.includes('Traceback')).slice(-3).join(' | ') || stderr.trim().slice(-200);
-        reject(new Error(`image_ocr: RapidOCR failed (exit ${code}): ${tail}`));
-        return;
-      }
-      try {
-        const parsed = JSON.parse(stdout.trim());
-        resolve({ lines: parsed.lines ?? [] });
-      } catch (error) {
-        reject(new Error(`image_ocr: cannot parse RapidOCR result: ${error.message}`));
-      }
-    });
-  });
-}
-
-/** Absolute path to the compiled macOS OCR binary (Apple Vision CLI); overridable via DSH_MACOS_OCR_BIN. */
-export function macOcrBinary() {
-  return process.env.DSH_MACOS_OCR_BIN ?? join(homedir(), '.dsh', 'cache', 'picturereader', 'macos-ocr');
-}
-
-/**
- * Whether the optional macOS OCR binary is available (built via scripts/setup-macos.mjs).
- * @param binary - binary path to probe (defaults to the configured path).
- * @returns true when the binary exists.
- */
-export async function macOcrAvailable(binary = macOcrBinary()) {
-  try {
-    await stat(binary);
-    return true;
-  } catch {
-    return false;
+export async function ocrImage(buffer, ext, { region, language } = {}) {
+  const image = decodeImage(buffer, ext);
+  let work = image;
+  if (region !== undefined) {
+    const cropped = cropRgba(image.data, image.width, image.height, normalizeRegion(region));
+    work = cropped;
   }
-}
-
-/**
- * Run macOS OCR on an image file via the compiled Swift CLI (Apple Vision
- * framework, VNRecognizeTextRequest). Fully local, no Python, ~100ms warm.
- * Chinese-first by default; `language` (BCP-47) overrides the priority.
- * @param pngPath - absolute path to a PNG/JPEG/TIFF file.
- * @param language - optional BCP-47 tag (e.g. "zh-Hans", "en-US").
- * @returns `{ lines: [{ text, score, x, y, width, height }] }` (pixel boxes, top-left origin).
- */
-export function runMacOcr(pngPath, language) {
-  const args = [String(pngPath)];
-  if (language !== undefined && String(language).trim() !== '') args.push(String(language).trim());
-  return new Promise((resolve, reject) => {
-    const child = spawn(macOcrBinary(), args);
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error('image_ocr: macOS OCR timed out after 60s'));
-    }, 60_000);
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      if (error.code === 'ENOENT') {
-        reject(new Error(`image_ocr: macOS OCR binary not found — build it with: node scripts/setup-macos.mjs (or set DSH_MACOS_OCR_BIN)`));
-        return;
-      }
-      reject(new Error(`image_ocr: cannot start macOS OCR: ${error.message}`));
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(`image_ocr: macOS OCR failed (exit ${code}): ${stderr.trim().slice(-200)}`));
-        return;
-      }
-      try {
-        const parsed = JSON.parse(stdout.trim());
-        resolve({ lines: parsed.lines ?? [] });
-      } catch (error) {
-        reject(new Error(`image_ocr: cannot parse macOS OCR result: ${error.message}`));
-      }
-    });
-  });
+  const pngBytes = encodePng(work.data, work.width, work.height);
+  const tmpPath = join(tmpdir(), `picturereader-ocr-${randomBytes(6).toString('hex')}.png`);
+  await writeFile(tmpPath, pngBytes);
+  try {
+    const result = await runPaddleOcr(tmpPath, { language });
+    return { width: work.width, height: work.height, lines: result.lines };
+  } finally {
+    await rm(tmpPath, { force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -1401,7 +1204,7 @@ export function runMacOcr(pngPath, language) {
  */
 export function renderOcr(value) {
   const lines = [];
-  lines.push(`ocr: ${value.path} (${value.width}x${value.height}, region=${value.region}, engine=${value.engine ?? 'windows'})`);
+  lines.push(`ocr: ${value.path} (${value.width}x${value.height}, region=${value.region}, engine=paddle, lang=${value.lang ?? PADDLE_DEFAULT_LANG})`);
   if (value.note !== undefined) {
     lines.push(`note: ${value.note}`);
   }

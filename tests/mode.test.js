@@ -1,6 +1,6 @@
 /**
- * picturereader 三模式 / 配置 / 运行时 / 图片桥 单测。
- * 覆盖 privacy(隐私)/smart(智能)/strict(严谨) 的路由语义与硬 gate。
+ * picturereader three-mode / config / runtime / image-bridge unit tests.
+ * Covers the routing semantics of privacy / smart / strict and the hard gate.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,21 +11,21 @@ import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import {
   MODES, normalizeMode, vlmAllowed, isPrivacy, visionAnalyzeDefaults, routePolicyText, routeModeTag,
 } from '../src/routing.js';
-import { modeOf, vlmConfigOf, ocrEngineOf, resolveVlmApiKey, MODE_KEYS, OCR_ENGINE_KEYS } from '../src/config.js';
+import { modeOf, vlmConfigOf, resolveVlmApiKey, MODE_KEYS } from '../src/config.js';
 import { setRuntimeConfig, setRuntimeSource, getRuntimeConfig, currentMode, vlmAllowedByRuntime } from '../src/runtime.js';
 import { hasImageBlock, hasShaAttachmentReference, deepFreeze, bridgeMessages } from '../src/bridge.js';
 
-test('normalizeMode 容错', () => {
+test('normalizeMode tolerates junk input', () => {
   assert.equal(normalizeMode('privacy'), 'privacy');
   assert.equal(normalizeMode('smart'), 'smart');
   assert.equal(normalizeMode('strict'), 'strict');
   assert.equal(normalizeMode(''), 'smart');
   assert.equal(normalizeMode(undefined), 'smart');
   assert.equal(normalizeMode('bogus'), 'smart');
-  assert.equal(normalizeMode('  PRIVACY  '), 'smart'); // 大小写/空白不匹配
+  assert.equal(normalizeMode('  PRIVACY  '), 'smart'); // case/whitespace do not match
 });
 
-test('vlmAllowed：隐私禁用，其余启用', () => {
+test('vlmAllowed: off in privacy, on elsewhere', () => {
   assert.equal(vlmAllowed('privacy'), false);
   assert.equal(vlmAllowed('smart'), true);
   assert.equal(vlmAllowed('strict'), true);
@@ -33,9 +33,9 @@ test('vlmAllowed：隐私禁用，其余启用', () => {
   assert.equal(isPrivacy('smart'), false);
 });
 
-test('visionAnalyzeDefaults 三种模式', () => {
+test('visionAnalyzeDefaults across the three modes', () => {
   const privacy = visionAnalyzeDefaults('privacy');
-  assert.equal(privacy.includeVlm, false, '隐私模式 VLM 必须禁用');
+  assert.equal(privacy.includeVlm, false, 'privacy must never allow the VLM');
   assert.equal(privacy.includeScan, true);
   const smart = visionAnalyzeDefaults('smart');
   assert.equal(smart.includeVlm, true);
@@ -45,26 +45,25 @@ test('visionAnalyzeDefaults 三种模式', () => {
   assert.equal(strict.includeOcr, true);
 });
 
-test('routePolicyText 包含模式策略关键词', () => {
-  assert.match(routePolicyText('privacy'), /绝不调用任何外部视觉 API/);
-  assert.match(routePolicyText('privacy'), /本地工具/);
+test('routePolicyText carries the per-mode keywords', () => {
+  assert.match(routePolicyText('privacy'), /Never call any external vision API/);
+  assert.match(routePolicyText('privacy'), /local tools/);
   assert.match(routePolicyText('smart'), /image_scan/);
-  assert.match(routePolicyText('smart'), /减少调用轮数/);
-  assert.match(routePolicyText('strict'), /交叉验证/);
-  assert.match(routeModeTag('privacy'), /隐私模式/);
+  assert.match(routePolicyText('smart'), /fewer round trips/);
+  assert.match(routePolicyText('strict'), /Cross-check/);
+  assert.match(routeModeTag('privacy'), /\[mode:Privacy\]/);
+  assert.match(routeModeTag('smart'), /\[mode:Smart\]/);
+  assert.match(routeModeTag('nonsense'), /\[mode:Smart\]/, 'an invalid mode normalizes to smart');
 });
 
-test('config.modeOf / vlmConfigOf / ocrEngineOf', () => {
+test('config.modeOf / vlmConfigOf', () => {
   assert.equal(modeOf({ mode: 'strict' }), 'strict');
   assert.equal(modeOf({ mode: 'nope' }), 'smart');
   const vlm = vlmConfigOf({ vlm_base: 'http://x', vlm_model: 'm', vlm_key: 'k', vlm_key_env: 'E' });
   assert.deepEqual(vlm, { baseUrl: 'http://x', model: 'm', apiKey: 'k', apiKeyEnv: 'E' });
-  assert.equal(ocrEngineOf({ ocr_engine: 'rapid' }), 'rapid');
-  assert.equal(ocrEngineOf({}), 'windows');
-  assert.equal(ocrEngineOf({ ocr_engine: 'x' }), 'windows');
 });
 
-test('resolveVlmApiKey：优先 apiKey，其次环境变量', () => {
+test('resolveVlmApiKey: apiKey wins over the environment variable', () => {
   process.env.__PR_TEST_KEY__ = 'from-env';
   try {
     assert.equal(resolveVlmApiKey({ apiKey: 'direct' }), 'direct');
@@ -75,28 +74,28 @@ test('resolveVlmApiKey：优先 apiKey，其次环境变量', () => {
   }
 });
 
-test('runtime：setRuntimeConfig 与 mode gate', () => {
+test('runtime: setRuntimeConfig and the mode gate', () => {
   setRuntimeConfig({ mode: 'privacy', vlm: { baseUrl: 'http://ext', model: 'm', apiKey: 'k' } });
   assert.equal(currentMode(), 'privacy');
   assert.equal(vlmAllowedByRuntime(), false);
   assert.equal(getRuntimeConfig().mode, 'privacy');
 });
 
-test('runtime：setRuntimeSource 惰性刷新', () => {
+test('runtime: setRuntimeSource refreshes lazily', () => {
   let cfg = { mode: 'smart', vlm_base: 'http://a', vlm_key: 'ka' };
   setRuntimeSource(() => cfg);
   assert.equal(currentMode(), 'smart');
   assert.equal(getRuntimeConfig().vlm.baseUrl, 'http://a');
   cfg = { mode: 'privacy', vlm_base: 'http://b' };
-  assert.equal(currentMode(), 'privacy', '改源后应热更');
+  assert.equal(currentMode(), 'privacy', 'a changed source must hot-apply');
   assert.equal(getRuntimeConfig().vlm.baseUrl, 'http://b');
   setRuntimeSource(null);
 });
 
-test('vlm privacy 硬 gate：即使配了外部 API 也返回 false', async () => {
+test('vlm privacy hard gate: false even when an external API is configured', async () => {
   const { isVlmConfigured } = await import('../src/vlm.js');
   setRuntimeConfig({ mode: 'privacy', vlm: { baseUrl: 'http://127.0.0.1:9999/v1', model: 'm', apiKey: 'k' } });
-  assert.equal(isVlmConfigured(), false, '隐私模式下配置了外部 API 也不可用');
+  assert.equal(isVlmConfigured(), false, 'privacy must disable the external API even when configured');
   setRuntimeConfig({ mode: 'smart', vlm: { baseUrl: '', model: '', apiKey: '' } });
 });
 
@@ -108,7 +107,7 @@ test('bridge.hasImageBlock / deepFreeze', () => {
   assert.equal(Object.isFrozen(frozen), true);
 });
 
-test('bridgeMessages：图片消息降级为本地工具引导（隐私模式）', async () => {
+test('bridgeMessages: image messages degrade to local-tool guidance (privacy)', async () => {
   setRuntimeConfig({ mode: 'privacy' });
   const dir = await mkdtemp(join(tmpdir(), 'pr-test-'));
   const attachment = { attachmentId: 'abc123', mediaType: 'image/png', name: 'shot.png' };
@@ -117,29 +116,29 @@ test('bridgeMessages：图片消息降级为本地工具引导（隐私模式）
   };
   const messages = [
     { role: 'user', content: [
-      { type: 'text', text: '请看' },
+      { type: 'text', text: 'look at this' },
       { type: 'image', attachment },
     ] },
-    { role: 'user', content: [{ type: 'text', text: '单独文本' }] },
+    { role: 'user', content: [{ type: 'text', text: 'text only' }] },
   ];
   try {
     const out = await bridgeMessages(messages, ctx, dir);
     assert.equal(out.length, 2);
     const bridged = out[0];
-    assert.notEqual(bridged, messages[0], '图片消息应换成新对象');
-    // 第二个文本消息应保持引用不变
+    assert.notEqual(bridged, messages[0], 'the image message must be replaced by a new object');
+    // the second text message must keep its identity
     assert.equal(out[1], messages[1]);
     const textBlocks = bridged.content.filter((b) => b.type === 'text');
-    assert.ok(textBlocks.some((b) => b.text.includes('隐私模式')), '含模式标签');
-    assert.ok(textBlocks.some((b) => b.text.includes('绝不调用任何外部视觉 API')), '隐私策略注入');
-    assert.ok(textBlocks.some((b) => b.text.includes('.png')), '导出路径写出');
+    assert.ok(textBlocks.some((b) => b.text.includes('[mode:Privacy]')), 'carries the mode tag');
+    assert.ok(textBlocks.some((b) => b.text.includes('Never call any external vision API')), 'injects the privacy policy');
+    assert.ok(textBlocks.some((b) => b.text.includes('.png')), 'writes out the export path');
   } finally {
     await rm(dir, { recursive: true, force: true });
     setRuntimeConfig({ mode: 'smart' });
   }
 });
 
-test('bridgeMessages：smart 模式 hint 不含隐私限制但含智能策略', async () => {
+test('bridgeMessages: a smart-mode hint carries the smart policy, not the privacy restriction', async () => {
   setRuntimeConfig({ mode: 'smart' });
   const dir = await mkdtemp(join(tmpdir(), 'pr-test2-'));
   const ctx = { attachments: { readImage: async () => ({ data: Buffer.from([9]) }) } };
@@ -147,8 +146,8 @@ test('bridgeMessages：smart 模式 hint 不含隐私限制但含智能策略', 
   try {
     const [out] = await bridgeMessages(messages, ctx, dir);
     const text = out.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
-    assert.ok(!text.includes('绝不调用任何外部视觉 API'));
-    assert.match(text, /智能模式/);
+    assert.ok(!text.includes('Never call any external vision API'));
+    assert.match(text, /\[mode:Smart\]/);
     assert.match(text, /image_scan/);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -156,27 +155,28 @@ test('bridgeMessages：smart 模式 hint 不含隐私限制但含智能策略', 
   }
 });
 
-test('导出常量完整性', () => {
+test('exported constants are complete', () => {
   assert.ok(MODE_KEYS.includes('privacy'));
-  assert.ok(OCR_ENGINE_KEYS.includes('rapid'));
+  assert.ok(MODE_KEYS.includes('smart'));
+  assert.ok(MODE_KEYS.includes('strict'));
   assert.ok(Object.keys(MODES).length >= 3);
 });
 
-test('vlm_enabled 选配：未勾选 → 外部 VLM 不可用', async () => {
+test('vlm_enabled opt-in: unchecked disables the external VLM', async () => {
   const { isVlmConfigured } = await import('../src/vlm.js');
-  // 未启用（显式 false）即使配了端点/Key 也不可用
+  // Explicitly disabled: an endpoint and key alone do not enable it.
   setRuntimeConfig({ mode: 'smart', vlm_enabled: false, vlm_base: 'http://ext/v1', vlm_key: 'k' });
-  assert.equal(isVlmConfigured(), false, '未勾选举配 → 外部 VLM 禁用');
-  // 勾选启用 → 可用（端点与 Key 齐备）
+  assert.equal(isVlmConfigured(), false, 'unchecked opt-in disables the external VLM');
+  // Checked, with endpoint and key present: available.
   setRuntimeConfig({ mode: 'smart', vlm_enabled: true, vlm_base: 'http://ext/v1', vlm_key: 'k' });
-  assert.equal(isVlmConfigured(), true, '勾选举配 + 端点/Key 齐 → 可用');
-  // 向后兼容：扁平 config 手写 vlm_base（未给 vlm_enabled）视为启用
+  assert.equal(isVlmConfigured(), true, 'opt-in checked plus endpoint and key means available');
+  // Backwards compatibility: a flat config with vlm_base but no vlm_enabled counts as enabled.
   setRuntimeConfig({ mode: 'smart', vlm_base: 'http://ext/v1', vlm_key: 'k' });
-  assert.equal(isVlmConfigured(), true, '手写 vlm_base 未给 enabled → 视为启用');
+  assert.equal(isVlmConfigured(), true, 'vlm_base without an explicit enabled flag means enabled');
   setRuntimeConfig({ mode: 'smart', vlm: { baseUrl: '', model: '', apiKey: '' } });
 });
 
-test('bridgeMessages：SHA 降级提示从附件对象库导出 PNG 并注入工具引导', async () => {
+test('bridgeMessages: a SHA downgrade note exports the PNG from the attachment store and injects tool guidance', async () => {
   setRuntimeConfig({ mode: 'smart' });
   const root = await mkdtemp(join(tmpdir(), 'pr-objects-'));
   const dir = await mkdtemp(join(tmpdir(), 'pr-bridge-'));
@@ -192,12 +192,12 @@ test('bridgeMessages：SHA 降级提示从附件对象库导出 PNG 并注入工
     await writeFile(join(objectDir, hash), png);
     assert.equal(hasShaAttachmentReference(messages), true);
     const [out] = await bridgeMessages(messages, {}, dir, { attachmentObjectsDir: root });
-    assert.notEqual(out, messages[0], 'SHA 附件消息应替换为新对象');
+    assert.notEqual(out, messages[0], 'the SHA attachment message must be replaced by a new object');
     const text = out.content[0].text;
     assert.match(text, /image_scan/);
     assert.match(text, /attachment_df7f126dcfac\.png/);
     const exported = join(dir, 'attachment_df7f126dcfac.png');
-    assert.deepEqual(await readFile(exported), png, '应写出原始图片字节');
+    assert.deepEqual(await readFile(exported), png, 'must write the original image bytes');
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
@@ -205,7 +205,7 @@ test('bridgeMessages：SHA 降级提示从附件对象库导出 PNG 并注入工
   }
 });
 
-test('bridgeMessages：无效或有歧义的 SHA 提示保持原始文本', async () => {
+test('bridgeMessages: an invalid or ambiguous SHA note keeps the original text', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pr-objects-'));
   const dir = await mkdtemp(join(tmpdir(), 'pr-bridge-'));
   const text = '[image omitted because this model accepts text only; attachment sha256:df7f126d]';

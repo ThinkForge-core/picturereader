@@ -1,33 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-image-edit.py — 本地修图 / 图像处理后端（由 DSH image_edit 工具调用）。
+image-edit.py — local image editing / processing backend (called by the DSH
+image_edit tool).
 
-纯 CPU 轻量实现：核心用 Pillow（PIL），P1/P2 部分用 OpenCV（cv2，可选）；
-rembg / rawpy / realesrgan-ncnn-vulkan 均为可选依赖，缺失时对应 action
-返回清晰的"请装依赖"提示，而不是崩溃。
+Pure-CPU lightweight implementation: the core uses Pillow (PIL) and the P1/P2
+parts use OpenCV (cv2, optional); rembg / rawpy / realesrgan-ncnn-vulkan are
+optional dependencies too — when one is missing the matching action returns a
+clear "install the dependency" hint instead of crashing. The dependencies are
+installed with `python3 scripts/install.py`.
 
-使用方式（argv）:
-  python image-edit.py <request.json路径>
+Usage (argv):
+  python image-edit.py <request.json path>
 
-  <request.json路径>  指向一个 JSON 文件，内容为请求对象（Node 侧已把输入图
-                      落盘为真实本地路径，from 域即绝对路径）。
+  <request.json path>  path to a JSON file holding the request object (the Node
+                       side has already materialized the input image onto a real
+                       local path, so the from field is an absolute path).
 
-请求对象通用字段:
-  action           必填，字符串。见下面 ACTIONS 支持列表。
-  from             必填，主输入图绝对路径。
-  from_extra       可选，数组，附加输入图绝对路径（composite/stitch 等用）。
-  out              必填，输出图绝对路径（含扩展名，决定格式）。
-  ...action 专属参数（见各 handle_* 函数）。所有量均需 JSON 数值/字符串。
+Common request fields:
+  action           required, string. See the ACTIONS list below.
+  from             required, absolute path of the main input image.
+  from_extra       optional, array of absolute paths of extra input images
+                   (used by composite/stitch and similar).
+  out              required, absolute output image path (including the
+                   extension, which determines the format).
+  ...action-specific parameters (see the handle_* functions). Every value must
+  be a JSON number/string.
 
-输出:
-  stdout 打印一行 JSON:
+Output:
+  stdout prints a single JSON line:
     {"ok": true, "out_path": "...", "width": W, "height": H, "bytes": N,
      "format": "PNG", "summary": "...", "extra": {...}}
-  或
-    {"error": "清晰的中文提示", "action": "..."}
-  任何未捕获异常都以 JSON error + 退出码 1 返回。
+  or
+    {"error": "clear English message", "action": "..."}
+  Any uncaught exception is returned as a JSON error plus exit code 1.
 
-支持的 action:
+Supported actions:
   P0: resize, rotate, flip, convert, adjust, blur, sharpen, composite, watermark
   P1: remove_background, edges, equalize_hist, denoise, perspective, stitch, thumbnail
   P2: exif_read, exif_write, raw_convert, upscale, colorspace, morphology
@@ -41,10 +48,11 @@ import tempfile
 import traceback
 
 
-# ---- 图像打开/保存基元（把所有操作收敛到 Pillow，保证格式兼容）----------------
+# ---- Image open/save primitives (every operation funnels through Pillow so
+# ---- that format compatibility stays guaranteed) -----------------------------
 
 def open_image(path):
-    """打开任意支持格式 -> RGBA 或 RGB 的 PIL Image。"""
+    """Open any supported format -> a PIL Image in RGBA or RGB mode."""
     from PIL import Image
     im = Image.open(path)
     im.load()
@@ -54,48 +62,50 @@ def open_image(path):
 
 
 def save_image(im, out, action):
-    """按 out 扩展名保存，统一转 RGB/RGBA，返回 (width, height, bytes, format)。"""
+    """Save according to the out extension, normalizing to RGB/RGBA.
+    Returns (width, height, bytes, format)."""
     from PIL import Image
     ext = os.path.splitext(out)[1].lower()
-    # 无损/带透明格式用 RGBA，其余用 RGB（JPEG 不支持 alpha）
+    # Lossless/transparency-capable formats keep RGBA, the rest use RGB
+    # (JPEG has no alpha channel).
     alpha_formats = {".png", ".webp", ".bmp", ".tiff", ".tif", ".gif"}
     if ext in alpha_formats and "A" in im.getbands():
         save_im = im
     else:
         save_im = im.convert("RGB")
-    # JPEG/TIFF 需要处理 mode；webp 无动画
+    # JPEG/TIFF need mode handling; webp is written without animation.
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     save_im.save(out)
     fmt = Image.open(out).format or "UNKNOWN"
     return im.width, im.height, os.path.getsize(out), fmt
 
 
-# ---- P0: 基础变换（纯 Pillow）------------------------------------------------
+# ---- P0: basic transforms (pure Pillow) -------------------------------------
 
 def handle_resize(req, im):
     width = int(req.get("width", 0))
     height = int(req.get("height", 0))
     if width <= 0 or height <= 0:
-        raise ValueError("resize 需要 width 和 height（>0 整数）")
+        raise ValueError("resize requires width and height (>0 integers)")
     mode = req.get("mode", "stretch")  # stretch | fit | fill
     keep_ratio = bool(req.get("keep_ratio", False))
     img = im
     if mode == "stretch":
         w, h = width, height
-    elif mode == "fit":  # 保持比例放入 width×height 画布，不留边（缩放比例取较小）
+    elif mode == "fit":  # keep the ratio, fit inside width x height (smaller scale wins)
         ratio = min(width / im.width, height / im.height)
         w, h = max(1, round(im.width * ratio)), max(1, round(im.height * ratio))
-    elif mode == "fill":  # 保持比例裁剪填充到 width×height
+    elif mode == "fill":  # keep the ratio, crop-fill to width x height
         ratio = max(width / im.width, height / im.height)
         w, h = round(im.width * ratio), round(im.height * ratio)
         img = im.resize((w, h), Image_LANCZOS())
-        # 居中裁剪
+        # center crop
         left = (w - width) // 2
         top = (h - height) // 2
         img = img.crop((left, top, left + width, top + height))
         w, h = width, height
     else:
-        raise ValueError("resize mode 只能是 stretch/fit/fill")
+        raise ValueError("resize mode must be stretch/fit/fill")
     if img is im:
         if keep_ratio and mode == "stretch":
             ratio = min(width / im.width, height / im.height)
@@ -112,11 +122,12 @@ def Image_LANCZOS():
 def handle_rotate(req, im):
     angle = float(req.get("angle", 0))
     expand = bool(req.get("expand", True))
-    fill = req.get("fill")  # 支持 "#rrggbb" 或 "255,255,255" 或 "transparent"
+    fill = req.get("fill")  # accepts "#rrggbb" or "255,255,255" or "transparent"
     from PIL import Image
     if not expand:
         return im.rotate(angle, expand=False)
-    # expand=True 时若带 alpha 直接可旋转；RGB 加画布色
+    # With expand=True an image carrying alpha rotates directly; an RGB image
+    # first gets a canvas fill color.
     if "A" in im.getbands():
         return im.rotate(angle, expand=True)
     color = parse_fill(fill) or (0, 0, 0)
@@ -149,11 +160,11 @@ def handle_flip(req, im):
         return im.transpose(Image.FLIP_TOP_BOTTOM)
     if axis == "both":
         return im.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.FLIP_TOP_BOTTOM)
-    raise ValueError("flip axis 只能是 horizontal/vertical/both")
+    raise ValueError("flip axis must be horizontal/vertical/both")
 
 
 def handle_convert(req, im):
-    # 格式由 out 扩展名决定（Pillow 支持 png/jpg/jpeg/webp/bmp/tiff/gif）
+    # The format comes from the out extension (Pillow supports png/jpg/jpeg/webp/bmp/tiff/gif)
     return im
 
 
@@ -171,7 +182,7 @@ def handle_adjust(req, im):
         work = ImageEnhance.Contrast(work).enhance(contrast)
     if saturation != 1.0:
         work = ImageEnhance.Color(work).enhance(saturation)
-    # 恢复 alpha
+    # restore alpha
     if "A" in im.getbands():
         alpha = im.getchannel("A")
         work = work.convert("RGBA")
@@ -199,13 +210,13 @@ def handle_sharpen(req, im):
 
 
 def handle_composite(req, im):
-    # 叠加前景图（from_extra[0]）到主图 im 上。
+    # Composite the foreground image (from_extra[0]) onto the main image im.
     from PIL import Image
     extra = req.get("from_extra") or []
     if not extra:
-        raise ValueError("composite 需要 from_extra[0]（前景/贴图路径）+ from（背景）")
+        raise ValueError("composite requires from_extra[0] (the foreground/overlay image path) plus from (the background)")
     fg = open_image(extra[0])
-    pos = req.get("position", "center")  # 像素 "x,y" 或 宏
+    pos = req.get("position", "center")  # pixel "x,y" or a keyword
     alpha = float(req.get("alpha", 1.0))
     bg = im.convert("RGBA")
     x, y = resolve_position(bg, fg, pos)
@@ -241,11 +252,11 @@ def resolve_position(bg, fg, pos):
         return (bg.width - fg.width) // 2, 0
     if s == "bottom_center":
         return (bg.width - fg.width) // 2, bg.height - fg.height
-    raise ValueError("composite position 未知: " + pos)
+    raise ValueError("unknown composite position: " + pos)
 
 
 def handle_watermark(req, im):
-    # 支持图片水印（from_extra[0]）或文字水印（text）。
+    # Supports an image watermark (from_extra[0]) or a text watermark (text).
     from PIL import Image, ImageDraw, ImageFont
     wtype = req.get("type", "text")
     pos = req.get("position", "bottom_right")
@@ -256,7 +267,7 @@ def handle_watermark(req, im):
     if wtype == "image":
         extra = req.get("from_extra") or []
         if not extra:
-            raise ValueError("watermark(image) 需要 from_extra[0] 指向水印图片")
+            raise ValueError("watermark(image) requires from_extra[0] pointing at the watermark image")
         wm = open_image(extra[0])
         x, y = resolve_position(bg, wm, pos)
         if alpha < 1.0:
@@ -269,10 +280,10 @@ def handle_watermark(req, im):
     else:
         text = str(req.get("text", ""))
         if not text:
-            raise ValueError("watermark(text) 需要 text")
+            raise ValueError("watermark(text) requires text")
         size = int(req.get("font_size", 36))
         font = load_font(size)
-        # 粗略测文本尺寸
+        # rough text size measurement
         bbox = draw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         if pos == "center":
@@ -293,12 +304,16 @@ def handle_watermark(req, im):
 
 def load_font(size):
     from PIL import ImageFont
+    # Common Linux font locations, CJK-capable ones first so that non-Latin
+    # watermark text still renders.
     candidates = [
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/msyhbd.ttc",
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ]
     for c in candidates:
         if os.path.exists(c):
@@ -321,7 +336,7 @@ def handle_thumbnail(req, im):
     return copy
 
 
-# ---- P1: 进阶（OpenCV / rembg）-----------------------------------------------
+# ---- P1: advanced (OpenCV / rembg) ------------------------------------------
 
 def get_cv2():
     try:
@@ -329,8 +344,8 @@ def get_cv2():
         return cv2
     except Exception as e:
         raise RuntimeError(
-            "该操作需要 OpenCV。请先运行 `node scripts/setup-image-venv.mjs` 安装 "
-            "opencv-python-headless（缺失原因: %s）" % e
+            "This action requires OpenCV. Install opencv-python-headless with: "
+            "run: python3 scripts/install.py (missing: %s)" % e
         )
 
 
@@ -351,7 +366,8 @@ def handle_equalize_hist(req, im):
     import numpy as np
     from PIL import Image
     mode = req.get("mode", "auto")  # auto | clahe
-    # 转灰度或彩色。彩色：对亮度通道做 CLAHE 再合并，保留色彩。
+    # Convert to gray or color. For color, apply CLAHE to the luminance channel
+    # and merge back, which preserves the colors.
     if "A" in im.getbands():
         rgba = im.convert("RGBA")
         rgb = rgba.convert("RGB")
@@ -400,9 +416,9 @@ def handle_perspective(req, im):
     cv2 = get_cv2()
     import numpy as np
     from PIL import Image
-    pts = req.get("points")  # 4 点：从左上逆时针 [x1,y1,x2,y2,...]
+    pts = req.get("points")  # 4 points: from the top-left, counter-clockwise [x1,y1,x2,y2,...]
     if not pts or len(pts) != 8:
-        raise ValueError("perspective 需要 points（8 个数，从左上起顺时针/逆时针 4 点）")
+        raise ValueError("perspective requires points (8 numbers: 4 corners starting at the top-left, clockwise or counter-clockwise)")
     src = np.float32([[pts[0], pts[1]], [pts[2], pts[3]], [pts[4], pts[5]], [pts[6], pts[7]]])
     w = int(req.get("width", im.width))
     h = int(req.get("height", im.height))
@@ -419,7 +435,7 @@ def handle_stitch(req, im):
     from PIL import Image
     extras = (req.get("from_extra") or [])
     if not extras:
-        raise ValueError("stitch 至少需要 from + from_extra[0] 两张图")
+        raise ValueError("stitch needs at least from plus from_extra[0] (two images)")
     direction = req.get("direction", "horizontal")
     imgs = [im] + [open_image(e).convert("RGBA") for e in extras]
     if req.get("mode", "resize") == "same_height" and direction == "horizontal":
@@ -457,26 +473,26 @@ def handle_remove_background(req, im):
         from rembg import remove
     except Exception as e:
         raise RuntimeError(
-            "背景移除需要 rembg（基于 U²-Net，约 35MB，CPU 可跑）。请先运行 "
-            "`node scripts/setup-image-venv.mjs`（会安装 rembg；缺失原因: %s）" % e
+            "Background removal requires rembg (U²-Net based, about 35 MB, runs on CPU). "
+            "Install rembg with: run: python3 scripts/install.py (missing: %s)" % e
         )
     rgba = im.convert("RGBA")
     out = remove(rgba, post_process_mask=bool(req.get("post_process", False)))
     return out.convert("RGBA")
 
 
-# ---- P2: 可选高级 -----------------------------------------------------------
+# ---- P2: optional extras ----------------------------------------------------
 
 def handle_exif_read(req, im):
     exif = im.getexif()
     fields = {}
     for tag_id, value in exif.items():
         name = EXIF_TAGS.get(tag_id, str(tag_id))
-        # 压缩字节值仅保留摘要，避免超长 JSON
+        # Keep only a summary for compressed byte values, so the JSON stays bounded.
         if isinstance(value, bytes) and len(value) > 200:
             value = "<%d bytes>" % len(value)
         fields[name] = str(value)
-    # Photo 标签的嵌套
+    # Nesting of the Photo tags
     try:
         if hasattr(exif, "get_ifd"):
             for ifd in (0x8825, 0x927C):  # GPS, MakerNote
@@ -489,7 +505,8 @@ def handle_exif_read(req, im):
 
 
 def handle_exif_write(req, im):
-    # 基础 EXIF：写入用户提供的键值（覆盖打印字段）。使用 Pillow 原生 getexif 改写。
+    # Basic EXIF: write the user-supplied key/value pairs (overriding the printed
+    # fields). Uses Pillow's native getexif rewrite.
     im_with_exif = im.copy()
     exif = im_with_exif.getexif()
     kv = req.get("fields")
@@ -507,7 +524,7 @@ def handle_raw_convert(req, im):
     try:
         import rawpy
     except Exception as e:
-        raise RuntimeError("RAW 处理需要 rawpy（基于 libraw）。先运行 `node scripts/setup-image-venv.mjs` 安装 rawpy（缺失: %s）" % e)
+        raise RuntimeError("RAW processing requires rawpy (based on libraw). Install rawpy with: run: python3 scripts/install.py (missing: %s)" % e)
     src = req["from"]
     raw = rawpy.imread(src)
     try:
@@ -519,18 +536,19 @@ def handle_raw_convert(req, im):
 
 
 def handle_upscale(req, im):
-    # 轻量超分：优先 realesrgan-ncnn-vulkan CLI（外部可执行文件，非本 venv）。
+    # Lightweight upscaling: prefers the realesrgan-ncnn-vulkan CLI (an external
+    # executable, not a Python package).
     exe = os.environ.get("DSH_REALESRGAN_EXE", "realesrgan-ncnn-vulkan")
     if shutil.which(exe) is None and not os.path.exists(exe):
         raise RuntimeError(
-            "超分需要外部 CLI realesrgan-ncnn-vulkan（Vulkan 推理，无需 PyTorch）。"
-            "请下载后设置环境变量 DSH_REALESRGAN_EXE 指向可执行文件。"
+            "Upscaling requires the external realesrgan-ncnn-vulkan CLI (Vulkan inference, no PyTorch). "
+            "Download it and point the DSH_REALESRGAN_EXE environment variable at the executable."
         )
     scale = int(req.get("scale", 2))
     src = req["from"]
     tmp = tempfile.mkdtemp(prefix="realesrgan_")
     try:
-        # realesrgan-ncnn-vulkan 只输出 png，放到临时目录
+        # realesrgan-ncnn-vulkan only writes png, so render into the temp directory
         out_png = os.path.join(tmp, "sr.png")
         env = dict(os.environ)
         cmd = [exe, "-i", src, "-o", out_png, "-s", str(scale)]
@@ -540,7 +558,7 @@ def handle_upscale(req, im):
             cmd += ["-n", str(req["n"])]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
         if proc.returncode != 0 or not os.path.exists(out_png):
-            raise RuntimeError("realesrgan 失败: " + (proc.stderr or proc.stdout or "")[-400:])
+            raise RuntimeError("realesrgan failed: " + (proc.stderr or proc.stdout or "")[-400:])
         return open_image(out_png)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -554,7 +572,7 @@ def handle_colorspace(req, im):
     rgb_arr = np.array(im.convert("RGB"))
     if target in ("hsv", "hsl"):
         out = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2HSV)
-        # 缩放到 0-255 便于存储
+        # scale to 0-255 so it can be stored
         h, s, v = out[:, :, 0] / 2, out[:, :, 1], out[:, :, 2]
         out = np.stack([h, s, v], axis=-1).astype(np.uint8)
     elif target == "lab":
@@ -566,7 +584,7 @@ def handle_colorspace(req, im):
         cmyk = im.convert("RGB").convert("CMYK")
         return cmyk
     else:
-        raise ValueError("colorspace target 只能是 rgb/hsv/lab/gray/cmyk")
+        raise ValueError("colorspace target must be rgb/hsv/lab/gray/cmyk")
     return Image.fromarray(out)
 
 
@@ -584,14 +602,14 @@ def handle_morphology(req, im):
         "gradient": cv2.MORPH_GRADIENT,
     }
     if op not in ops:
-        raise ValueError("morphology op 只能是 erode/dilate/open/close/gradient")
+        raise ValueError("morphology op must be erode/dilate/open/close/gradient")
     gray = np.array(im.convert("L"))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (size, size))
     out = cv2.morphologyEx(gray, ops[op], kernel)
     return Image.fromarray(out).convert("RGB")
 
 
-# ---- EXIF 标签映射（常用）----------------------------------------------------
+# ---- EXIF tag map (common tags) ---------------------------------------------
 
 EXIF_TAGS = {
     0x010F: "Make", 0x0110: "Model", 0x0112: "Orientation", 0x0132: "DateTime",
@@ -603,7 +621,7 @@ EXIF_TAGS = {
 EXIF_TAGS_REV = {v: k for k, v in EXIF_TAGS.items()}
 
 
-# ---- 分发 ---------------------------------------------------------------
+# ---- dispatch ---------------------------------------------------------------
 
 P0 = {
     "resize": handle_resize, "rotate": handle_rotate, "flip": handle_flip,
@@ -623,20 +641,20 @@ P2 = {
 }
 ACTIONS = {**P0, **P1, **P2}
 ACTIVITY = {
-    "resize": "P0 基础变换", "rotate": "P0 基础变换", "flip": "P0 基础变换",
-    "convert": "P0 基础变换", "adjust": "P0 基础变换", "blur": "P0 基础变换",
-    "sharpen": "P0 基础变换", "composite": "P0 基础变换", "watermark": "P0 基础变换",
-    "thumbnail": "P0 基础变换", "edges": "P1 进阶", "equalize_hist": "P1 进阶",
-    "denoise": "P1 进阶", "perspective": "P1 进阶", "stitch": "P1 进阶",
-    "remove_background": "P1 进阶", "exif_read": "P2 高级", "exif_write": "P2 高级",
-    "raw_convert": "P2 高级", "upscale": "P2 高级", "colorspace": "P2 高级",
-    "morphology": "P2 高级",
+    "resize": "P0 basic transform", "rotate": "P0 basic transform", "flip": "P0 basic transform",
+    "convert": "P0 basic transform", "adjust": "P0 basic transform", "blur": "P0 basic transform",
+    "sharpen": "P0 basic transform", "composite": "P0 basic transform", "watermark": "P0 basic transform",
+    "thumbnail": "P0 basic transform", "edges": "P1 advanced", "equalize_hist": "P1 advanced",
+    "denoise": "P1 advanced", "perspective": "P1 advanced", "stitch": "P1 advanced",
+    "remove_background": "P1 advanced", "exif_read": "P2 extras", "exif_write": "P2 extras",
+    "raw_convert": "P2 extras", "upscale": "P2 extras", "colorspace": "P2 extras",
+    "morphology": "P2 extras",
 }
 
 
 def main(argv):
     if len(argv) < 1:
-        print(json.dumps({"error": "usage: image-edit.py <request.json路径>"}))
+        print(json.dumps({"error": "usage: image-edit.py <request.json path>"}))
         return 2
     req_path = argv[0]
     if not os.path.exists(req_path):
@@ -647,16 +665,16 @@ def main(argv):
 
     action = req.get("action")
     if not action or action not in ACTIONS:
-        print(json.dumps({"error": "未知 action '%s'（支持: %s）" % (action, ", ".join(sorted(ACTIONS)))}))
+        print(json.dumps({"error": "unknown action '%s' (supported: %s)" % (action, ", ".join(sorted(ACTIONS)))}))
         return 1
 
     src = req.get("from")
     out = req.get("out")
     if not src or not os.path.exists(src):
-        print(json.dumps({"error": "输入文件不存在: %s" % src, "action": action}))
+        print(json.dumps({"error": "input file does not exist: %s" % src, "action": action}))
         return 1
     if not out:
-        print(json.dumps({"error": "需要 out（输出路径）", "action": action}))
+        print(json.dumps({"error": "out (output path) is required", "action": action}))
         return 1
 
     try:
@@ -670,10 +688,10 @@ def main(argv):
             width, height = result.width, result.height
             bytes_n = os.path.getsize(out) if os.path.exists(out) else None
             fmt = None
-            # exif_read 不改文件，直接输出 exif 信息
+            # exif_read does not modify the file, it just reports the exif data
             print(json.dumps({
                 "ok": True, "out_path": None, "width": result.width, "height": result.height,
-                "bytes": 0, "format": None, "summary": "读取了 %d 个 EXIF 字段" % len(extra.get("exif", {})),
+                "bytes": 0, "format": None, "summary": "read %d EXIF fields" % len(extra.get("exif", {})),
                 "action": action, "extra": extra,
             }))
             return 0
@@ -689,7 +707,7 @@ def main(argv):
         print(json.dumps({
             "ok": True, "out_path": out, "width": width, "height": height,
             "bytes": bytes_n, "format": fmt, "action": action,
-            "summary": "%s 完成（%s）：%dx%d -> %s（%d 字节）" % (
+            "summary": "%s completed (%s): %dx%d -> %s (%d bytes)" % (
                 ACTIVITY.get(action, action), action, width, height, os.path.basename(out), bytes_n),
         }))
         return 0
@@ -701,7 +719,7 @@ def main(argv):
 if __name__ == "__main__":
     try:
         code = main(sys.argv[1:])
-    except Exception as e:  # 顶层兜底
+    except Exception as e:  # top-level safety net
         print(json.dumps({"error": "unexpected: %s" % e}))
         code = 1
     sys.exit(code)

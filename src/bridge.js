@@ -88,10 +88,10 @@ export async function exportShaAttachment(prefix, dir, objectsDir = ATTACHMENT_O
 
 function imageToolGuidance(path, mode, name = '') {
   const policy = routePolicyText(mode, { vlmConfigured: true });
-  return `用户粘贴了一张图片${name}，已导出到：${path}\n` +
+  return `The user pasted an image${name}; it has been exported to: ${path}\n` +
     `${routeModeTag(mode)}\n` +
     policy +
-    `\n请先用 image_scan 分析 ${path}（如含文字再用 image_ocr）。`;
+    `\nStart by analyzing ${path} with image_scan (use image_ocr as well when it contains text).`;
 }
 
 async function bridgeShaAttachmentText(text, dir, mode, objectsDir) {
@@ -172,12 +172,12 @@ export async function bridgeMessages(messages, ctx, dir, { attachmentObjectsDir 
         try {
           path = await exportImage(block.attachment, ctx, dir);
         } catch {
-          // 导出失败时回退成纯提示，不让整轮崩。
-          blocks.push({ type: 'text', text: '[图片附件已粘贴，将尝试读取分析]' });
+          // A failed export degrades to a plain note instead of failing the turn.
+          blocks.push({ type: 'text', text: '[An image attachment was pasted; the plugin will try to read and analyze it]' });
           changed = true;
           continue;
         }
-        const name = block.attachment.name ? `（${block.attachment.name}）` : '';
+        const name = block.attachment.name ? ` (${block.attachment.name})` : '';
         blocks.push({ type: 'text', text: imageToolGuidance(path, mode, name) });
         changed = true;
         continue;
@@ -268,7 +268,7 @@ export function attachImageBridge(ctx) {
             ...result,
             content: [{
               type: 'text',
-              text: `[图片已读取: ${filePath}]\n\n当前模型不支持图像输入，无法直接处理图片。请使用 picturereader 的工具来分析此图片：\n- image_scan(file_path="${filePath}") — 像素级扫描，看布局/颜色/结构\n- image_ocr(file_path="${filePath}") — 文字识别\n- vision_analyze(file_path="${filePath}") — 统一图像理解\n\n这些工具适用于所有模型，不需要模型支持图像输入。`
+              text: `[Image read: ${filePath}]\n\nThe current model does not accept image input, so the picture cannot be processed directly. Use the picturereader tools to analyze it:\n- image_scan(file_path="${filePath}") — pixel-level scan: layout / colors / structure\n- image_ocr(file_path="${filePath}") — text recognition\n- vision_analyze(file_path="${filePath}") — unified image understanding\n\nThese tools work with every model and do not require image-input support.`
             }]
           };
           console.log('[picturereader] intercepted read_image image block, replaced with text guidance');

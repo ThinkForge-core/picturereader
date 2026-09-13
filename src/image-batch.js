@@ -26,6 +26,7 @@
 import { extname } from 'node:path';
 import { BYTE_CAP, MAX_PIXELS } from './tool.js';
 import { getRuntimeConfig } from './runtime.js';
+import { missingFileHint } from './workspace-paths.js';
 
 const CORE_URL = new URL('./core.js', import.meta.url).href;
 let coreCache = { url: null, mtime: -1, module: null };
@@ -306,7 +307,8 @@ export function createImageBatchTool(ctx) {
             signal: exec.signal
           });
           const info = await ctx.fs.stat(target, exec.signal);
-          if (!info) throw new Error('file not found');
+          if (!info) throw new Error(
+            `file not found: ${target.displayPath}${missingFileHint(target.displayPath)}`);
           if (info.type !== 'file') throw new Error('not a regular file');
           const data = await ctx.fs.readBytes(target, exec.signal, BYTE_CAP);
           const image = core.decodeImage(data, ext);
@@ -364,9 +366,12 @@ export function createImageBatchTool(ctx) {
       const results = new Map(); // index -> { lines, note }
       const runOcr = async (item) => {
         try {
-          // Engine default follows the plugin setting ("windows" when unset).
-          const engine = getRuntimeConfig().ocr?.engine ?? 'windows';
-          const res = await ocrFn(item.raw, item.ext, { engine });
+          // PaddleOCR is the only engine; the recognition model is selected by
+          // the plugin's configured OCR language, when one is set.
+          const language = String(getRuntimeConfig().ocr?.language ?? '');
+          const res = await ocrFn(item.raw, item.ext, {
+            ...(language !== '' ? { language } : {})
+          });
           results.set(item.index, { lines: res?.lines ?? [] });
           return results.get(item.index);
         } catch (error) {

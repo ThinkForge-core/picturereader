@@ -27,9 +27,9 @@
 
 import { extname, resolve as pathResolve, join, dirname } from 'node:path';
 import { writeFile, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { importCore, BYTE_CAP, MAX_PIXELS } from './tool.js';
+import { defaultOutputDir, missingFileHint } from './workspace-paths.js';
 
 /** Amount of area that a norm channel's leading bits dedicate to one 3-bit bucket. */
 const BUCKET_SHIFT = 5; // 256 >> 5 = 8 buckets per channel (3 bits/channel)
@@ -72,9 +72,9 @@ async function ensureDirFor(p) {
   await mkdir(dirname(p), { recursive: true });
 }
 
-/** Build a default crop temp path under the OS temp dir. */
-function defaultCropPath() {
-  const dir = join(tmpdir(), 'picturereader');
+/** Build the default crop path inside the session workspace scratch dir. */
+function defaultCropPath(cwd) {
+  const dir = defaultOutputDir('crop', { cwd });
   return { dir, file: join(dir, `crop-${Date.now()}-${randomBytes(4).toString('hex')}.png`) };
 }
 
@@ -206,7 +206,7 @@ export function createImageCropTool(ctx) {
         signal: exec.signal
       });
       const info = await ctx.fs.stat(target, exec.signal);
-      if (!info) throw new Error(`image_crop: cannot read "${target.displayPath}": file not found`);
+      if (!info) throw new Error(`image_crop: cannot read "${target.displayPath}": file not found${missingFileHint(target.displayPath)}`);
       if (info.type !== 'file') throw new Error(`image_crop: cannot read "${target.displayPath}": not a regular file`);
       const bytes = await ctx.fs.readBytes(target, exec.signal, BYTE_CAP);
 
@@ -223,7 +223,7 @@ export function createImageCropTool(ctx) {
         outPath = explicitOut;
         await ensureDirFor(outPath);
       } else {
-        const def = defaultCropPath();
+        const def = defaultCropPath(cwd);
         tempDir = def.dir;
         outPath = def.file;
         generated = true;
@@ -362,7 +362,7 @@ export function createImagePaletteTool(ctx) {
         signal: exec.signal
       });
       const info = await ctx.fs.stat(target, exec.signal);
-      if (!info) throw new Error(`image_palette: cannot read "${target.displayPath}": file not found`);
+      if (!info) throw new Error(`image_palette: cannot read "${target.displayPath}": file not found${missingFileHint(target.displayPath)}`);
       if (info.type !== 'file') throw new Error(`image_palette: cannot read "${target.displayPath}": not a regular file`);
       const bytes = await ctx.fs.readBytes(target, exec.signal, BYTE_CAP);
 
@@ -611,8 +611,8 @@ export function createImageCompareTool(ctx) {
       const targetB = await ctx.fs.resolve(filePathB, { ...(cwd !== undefined ? { cwd } : {}), signal: exec.signal });
       const infoA = await ctx.fs.stat(targetA, exec.signal);
       const infoB = await ctx.fs.stat(targetB, exec.signal);
-      if (!infoA) throw new Error(`image_compare: cannot read "${targetA.displayPath}": file not found`);
-      if (!infoB) throw new Error(`image_compare: cannot read "${targetB.displayPath}": file not found`);
+      if (!infoA) throw new Error(`image_compare: cannot read "${targetA.displayPath}": file not found${missingFileHint(targetA.displayPath)}`);
+      if (!infoB) throw new Error(`image_compare: cannot read "${targetB.displayPath}": file not found${missingFileHint(targetB.displayPath)}`);
       if (infoA.type !== 'file') throw new Error(`image_compare: cannot read "${targetA.displayPath}": not a regular file`);
       if (infoB.type !== 'file') throw new Error(`image_compare: cannot read "${targetB.displayPath}": not a regular file`);
       const bytesA = await ctx.fs.readBytes(targetA, exec.signal, BYTE_CAP);

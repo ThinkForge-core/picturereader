@@ -43,7 +43,7 @@ function makeFakeCtx(entries) {
   return { ctx, emitted };
 }
 
-const EXEC = { signal: undefined, agent: { session: { header: { cwd: 'C:\\work' } } } };
+const EXEC = { signal: undefined, agent: { session: { header: { cwd: '/work' } } } };
 
 function tempDir(t) {
   const dir = mkdtempSync(join(tmpdir(), 'picturereader-more-'));
@@ -98,17 +98,22 @@ test('image_crop: quarter region halves both dimensions and pixels', async (t) =
   assert.equal(result.width * result.height, 2500, 'quarter of 100x100 = 2500 px');
 });
 
-test('image_crop: default writes to a generated temp file', async (t) => {
+test('image_crop: default writes into the session workspace scratch dir', async (t) => {
   const rgba = createRgba(10, 10, () => [0, 255, 0]);
   const buf = pngFromRgba(10, 10, rgba);
   const { ctx } = makeFakeCtx({ 'a.png': { buffer: buf } });
   const tool = createImageCropTool(ctx);
-  const result = await tool.execute({ file_path: 'a.png', region: [0, 0, 1, 1] }, EXEC);
+  // A real cwd: the default output is created for real, and it has to land
+  // somewhere the agent's shell can read it.
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-crop-'));
+  t.after(() => { try { rmSync(cwd, { recursive: true, force: true }); } catch {} });
+  const exec = { signal: undefined, agent: { session: { header: { cwd } } } };
+  const result = await tool.execute({ file_path: 'a.png', region: [0, 0, 1, 1] }, exec);
   assert.equal(result.generated, true);
-  assert.ok(result.outPath.includes('picturereader'));
+  assert.ok(result.outPath.startsWith(join(cwd, '.picturereader')),
+    `default crop output must be visible to the agent: ${result.outPath}`);
   assert.match(result.outPath, /crop-[\d]+-[0-9a-f]+\.png$/);
   assert.ok(existsSync(result.outPath));
-  t.after(() => { try { rmSync(result.outPath, { force: true }); } catch {} });
 });
 
 test('image_crop: invalid region throws a clear error', async (t) => {

@@ -52,7 +52,7 @@ function makeFakeCtx(store, { ocr = fakeOcr, emit = true } = {}) {
     fs: {
       async resolve(path, opts) {
         const base = String(path).split(/[\\/]/).pop();
-        return { targetKey: `C:\\img\\${base}`, displayPath: `C:\\img\\${base}` };
+        return { targetKey: `/img/${base}`, displayPath: `/img/${base}` };
       },
       async stat(target) {
         const base = String(target.displayPath).split(/[\\/]/).pop();
@@ -68,7 +68,7 @@ function makeFakeCtx(store, { ocr = fakeOcr, emit = true } = {}) {
   return { ctx, emitted };
 }
 
-const EXEC = { signal: undefined, agent: { session: { header: { cwd: 'C:\\work' } } } };
+const EXEC = { signal: undefined, agent: { session: { header: { cwd: '/work' } } } };
 
 // ---------------------------------------------------------------------------
 // tests

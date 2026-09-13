@@ -1,33 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-doc-to-image.py — Office/PDF 逐页转 PNG 渲染脚本（由 DSH document_to_image 工具调用）。
+doc-to-image.py — Office/PDF per-page PNG rendering script (called by the DSH
+document_to_image tool).
 
-完整链路:
-  .pdf                       ──直接──► PyMuPDF(fitz) 逐页渲染 PNG
-  .docx/.doc/.xlsx/.xls/.pptx/.ppt ──► LibreOffice(soffice) headless 转 PDF ──► fitz 渲染 PNG
+The caller runs this script with the plugin's media Python environment (PyMuPDF
+is installed there), so the interpreter is never resolved here.
 
-用法（argv）:
+Full chain:
+  .pdf                              ──directly──►    PyMuPDF(fitz) renders each page to PNG
+  .docx/.doc/.xlsx/.xls/.pptx/.ppt  ──► LibreOffice(soffice) headless converts to PDF ──► fitz renders PNG
+
+Usage (argv):
   python doc-to-image.py <input> <out_dir> <prefix> <dpi> <max_pages>
 
-  <input>      源文档的绝对本地路径（pdf 或 office 文件；Node 侧已落盘）。
-  <out_dir>    输出目录（已存在；PNG 写到这里）。
-  <prefix>     PNG 文件名前缀，输出形如 <out_dir>/<prefix>_<i>.png，i 从 1 起。
-  <dpi>        渲染分辨率（72..300，默认 150）。
-  <max_pages>  最多渲染前 N 页（默认 50）。
+  <input>      absolute local path of the source document (pdf or office file;
+               the Node side has already materialized it).
+  <out_dir>    output directory (already exists; the PNGs are written here).
+  <prefix>     PNG file name prefix, output looks like <out_dir>/<prefix>_<i>.png, i starting at 1.
+  <dpi>        rendering resolution (72..300, default 150).
+  <max_pages>  render at most the first N pages (default 50).
 
-输出:
-  stdout 打印一行 JSON:
+Output:
+  stdout prints a single JSON line:
     {"pages": [{"path": "...", "width": 888, "height": 1258, "bytes": 123456}], "page_count": 42, "truncated": false}
 
-  page_count 是文档实际总页数；pages 只含实际渲染的（<= max_pages）页面。
-  任何错误以非零退出码 + stderr 信息返回。
+  page_count is the real total page count of the document; pages only holds the
+  pages actually rendered (<= max_pages).
+  Any error is reported with a non-zero exit code plus a stderr/stdout message.
 
-soffice 可执行路径:
-  优先读环境变量 DSH_SOFFICE；未设置则用默认
-  C:/Program Files/LibreOffice/program/soffice.exe，并通过 glob 兜底大小写
-  （实际 Windows 安装是 "Program"/"program" 小写目录）。soffice 缺失时报清晰错误。
+soffice executable path:
+  The DSH_SOFFICE environment variable wins when it is set (the caller always
+  sets it); otherwise soffice/libreoffice are looked up on PATH, and finally the
+  known Linux locations /usr/bin/soffice, /usr/local/bin/soffice,
+  /usr/lib/libreoffice/program/soffice and /opt/libreoffice/program/soffice are
+  probed. A missing soffice is reported as a clear error.
 """
-import glob
 import json
 import os
 import shutil
@@ -35,43 +42,39 @@ import subprocess
 import sys
 import tempfile
 
-# ---- 常量 ------------------------------------------------------------------
+# ---- constants --------------------------------------------------------------
 
 SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt"}
 OFFICE_EXTS = SUPPORTED_EXTS - {".pdf"}
-DEFAULT_SOFFICE = r"C:/Program Files/LibreOffice/program/soffice.exe"
+DEFAULT_SOFFICE = "/usr/bin/soffice"
 SOFFICE_CANDIDATES = (
-    "C:/Program Files/LibreOffice/program/soffice.exe",
-    "C:/Program Files/LibreOffice/Program/soffice.exe",
-    "C:/Program Files (x86)/LibreOffice/program/soffice.exe",
-    "C:/Program Files (x86)/LibreOffice/Program/soffice.exe",
+    "/usr/bin/soffice",
+    "/usr/local/bin/soffice",
+    "/usr/lib/libreoffice/program/soffice",
+    "/opt/libreoffice/program/soffice",
 )
 
 
 def find_soffice():
-    """返回可用的 soffice 可执行路径，找不到返回 None。glob 兜底大小写差异。"""
+    """Return a usable soffice executable path, or None when LibreOffice is absent."""
     env = os.environ.get("DSH_SOFFICE", "").strip()
     if env:
         if os.path.exists(env):
             return env
-        # 环境变量指了但不存在 -> 继续往下，但先尝试把它的上级目录 glob 一下
-        pattern = os.path.join(os.path.dirname(env), "soffice.exe")
-        for hit in glob.glob(pattern):
+        # DSH_SOFFICE is set but does not exist -> keep looking.
+    for name in ("soffice", "libreoffice"):
+        hit = shutil.which(name)
+        if hit:
             return hit
     for cand in SOFFICE_CANDIDATES:
         if os.path.exists(cand):
             return cand
-    # 大小写兜底：在标准根目录里找 program* / Program* 下的 soffice.exe
-    for base in ("C:/Program Files/LibreOffice", "C:/Program Files (x86)/LibreOffice"):
-        for sub in ("program", "Program", "PROGRAM", "Program Files"):
-            p = os.path.join(base, sub, "soffice.exe")
-            if os.path.exists(p):
-                return p
     return None
 
 
 def soffice_to_pdf(src, out_dir, soffice, timeout_s=120):
-    """headless 把 office 文件转成 pdf，返回 pdf 路径。带独立 UserInstallation profile 避免锁冲突。"""
+    """Convert an office file to pdf with headless soffice; returns the pdf path.
+    Uses a dedicated UserInstallation profile so parallel runs cannot clash."""
     profile_dir = os.path.join(out_dir, ".lo_profile")
     os.makedirs(profile_dir, exist_ok=True)
     profile_uri = "file:///" + profile_dir.replace("\\", "/")
@@ -85,12 +88,13 @@ def soffice_to_pdf(src, out_dir, soffice, timeout_s=120):
         "--outdir", out_dir,
         src,
     ]
-    # soffice 不开管道，capture_output 会乖乖返回；timeout 兜底防挂起。
+    # soffice keeps no pipe open, so capture_output returns promptly; the
+    # timeout is the safeguard against a hang.
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     base = os.path.splitext(os.path.basename(src))[0]
     pdf_path = os.path.join(out_dir, base + ".pdf")
     if not os.path.exists(pdf_path):
-        msg = "soffice 未产出 pdf"
+        msg = "soffice produced no PDF"
         if proc.stderr and proc.stderr.strip():
             msg += ": " + proc.stderr.strip()[-500:]
         raise RuntimeError(msg)
@@ -98,7 +102,7 @@ def soffice_to_pdf(src, out_dir, soffice, timeout_s=120):
 
 
 def render_pdf(pdf_path, out_dir, prefix, dpi, max_pages):
-    """用 fitz 把 pdf 逐页渲染成 PNG，返回 (pages:list[dict], page_count:int, truncated:bool)。"""
+    """Render the pdf to PNG page by page with fitz; returns (pages:list[dict], page_count:int, truncated:bool)."""
     import fitz  # PyMuPDF
 
     doc = fitz.open(pdf_path)
@@ -142,7 +146,7 @@ def main(argv):
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # 1) 得到待渲染的 pdf 路径。
+    # 1) Resolve the pdf path that will be rendered.
     pdf_path = None
     tmp_dir = None
     if ext == ".pdf":
@@ -150,28 +154,30 @@ def main(argv):
     else:
         soffice = find_soffice()
         if not soffice:
-            print(json.dumps({"error": "LibreOffice(soffice) 未找到。请安装 LibreOffice，或设置环境变量 "
-                                        "DSH_SOFFICE 指向 soffice.exe 的可执行路径。"}))
+            print(json.dumps({"error": "LibreOffice (soffice) not found. Install it with your package manager "
+                                        "(libreoffice on Debian/Ubuntu, libreoffice-fresh on Arch), or set the "
+                                        "DSH_SOFFICE environment variable to the soffice executable path."}))
             return 1
-        # 独立临时目录放中间 pdf，避免多个同 base 文件互覆盖。
+        # Keep the intermediate pdf in its own temp directory so documents that
+        # share a base name cannot overwrite each other.
         tmp_dir = tempfile.mkdtemp(prefix="lo_pdf_", dir=out_dir)
         try:
             pdf_path = soffice_to_pdf(src, tmp_dir, soffice)
         except subprocess.TimeoutExpired:
-            print(json.dumps({"error": "soffice 转换超时（>120s），请检查文档是否损坏或过大。"}))
+            print(json.dumps({"error": "soffice conversion timed out (>120s); check whether the document is damaged or too large."}))
             return 1
         except Exception as e:  # noqa: BLE001
-            print(json.dumps({"error": "soffice 转换失败: {}".format(e)}))
+            print(json.dumps({"error": "soffice conversion failed: {}".format(e)}))
             return 1
 
-    # 2) fitz 渲染。
+    # 2) Render with fitz.
     try:
         pages, page_count, truncated = render_pdf(pdf_path, out_dir, prefix, dpi, max_pages)
     except Exception as e:  # noqa: BLE001
-        print(json.dumps({"error": "pdf 渲染失败: {}".format(e)}))
+        print(json.dumps({"error": "PDF rendering failed: {}".format(e)}))
         return 1
     finally:
-        # 清理中间 pdf 临时目录（保留最终 PNG）。
+        # Drop the intermediate pdf temp directory (keeping the final PNGs).
         if tmp_dir and os.path.isdir(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -188,7 +194,7 @@ def main(argv):
 if __name__ == "__main__":
     try:
         code = main(sys.argv[1:])
-    except Exception as e:  # 顶层兜底：任何未捕获异常都以 JSON error 传出
+    except Exception as e:  # top-level safety net: every uncaught exception becomes a JSON error
         print(json.dumps({"error": "unexpected: {}".format(e)}))
         code = 1
     sys.exit(code)

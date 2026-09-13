@@ -1,0 +1,6 @@
+# Interpreter: the PaddleOCR environment used by image_ocr.
+#
+# IMPORTANT: paddlepaddle publishes no cp314 wheels, so scripts/install.py
+# creates this venv with Python 3.13 or older.
+paddlepaddle==3.3.1
+paddleocr==3.7.0

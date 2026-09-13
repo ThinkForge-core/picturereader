@@ -42,7 +42,6 @@ function build(raw) {
       exportDir: String(v.bridge_export_dir ?? ''),
     },
     ocr: {
-      engine: String(v.ocr_engine ?? 'windows'),
       language: String(v.ocr_language ?? ''),
     },
     scan: {

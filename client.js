@@ -1,7 +1,7 @@
 /**
  * picturereader — Web settings card (client half).
  *
- * Registers a "图片阅读" section inside the DSH Web settings page, restyled to
+ * Registers a "Picture Reader" section inside the DSH Web settings page, styled to
  * the settings-panel design language (the same vocabulary the General-section
  * rows and the models page use: 720px section, bordered 12px card groups,
  * capsule buttons h36 r18, 32px inputs, custom-chevron selects, details
@@ -9,10 +9,14 @@
  *
  *   - Top: usage mode dropdown (privacy / smart / strict)
  *   - Vision bridge model picker (checkbox list of all text-only models,
- *     each with an optional note field; checked models get a "(视觉)" variant)
- *   - External vision API fields (base URL / model / key) — gated by "启用外部视觉 API" checkbox
- *   - OCR engine selector
- *   - Advanced settings (timeout / max tokens / export dir / debug)
+ *     each with an optional note field; checked models get a "(Vision)" variant)
+ *   - External vision API fields (base URL / model / key) — gated by the
+ *     "Enable external vision API" checkbox
+ *   - Advanced settings (timeout / max tokens / export dir / OCR language / debug)
+ *
+ * The card is English-only: the plugin dropped its Chinese dictionary and the
+ * platform-conditional OCR engine selector, because PaddleOCR is now the only
+ * OCR engine and the project targets Linux only.
  *
  * Hand-written ModuleLoader bundle — no build step. scope.load() usage is
  * guarded (`typeof scope.load === "function"`) so the card runs on DSH hosts
@@ -87,57 +91,6 @@ window.__ModuleLoader__.load({
     // ── locale ────────────────────────────────────────────────────────────
     var NS = "picturereader";
     var inject = ["slots", "locale", "settingsScope"];
-    var zh = {
-      nav: "图片阅读",
-      intro: "picturereader：让纯文本模型用本地工具看懂图片。选择使用模式；在下方勾选需要视觉桥的模型；配置外部视觉端点（选配）。修改后即时生效（设置项），视觉桥需重启 DSH。",
-      mode: "使用模式",
-      modePrivacy: "隐私模式",
-      modeSmart: "智能模式",
-      modeStrict: "严谨模式",
-      modeHint: "隐私=绝不调用外部 API，全走本地；智能=先简单看图再决定是否外呼（省轮数/时间）；严谨=自行选择+必要时交叉验证细节。",
-      visionBridgeModels: "视觉桥：为以下模型注入视觉孪生",
-      visionBridgeModelsHint: "勾选的文本模型会在模型选择器里多一个（视觉）变体，选它即可粘贴图片显示缩略图并自动分析。（需重启 DSH 生效）",
-      visionBridgeNote: "备注",
-      visionBridgeNotePH: "视觉（可改）",
-      vlmEnabled: "启用外部视觉 API（选配）",
-      vlmEnabledHint: "勾选后才配置并允许调用外部视觉端点；不勾选一律走本地工具，图片绝不外发。",
-      vlmBase: "视觉 API Base URL",
-      vlmBasePlaceholder: "https://api.openai.com/v1（留空=禁用外部 VLM）",
-      vlmModel: "视觉模型",
-      vlmKey: "视觉 API Key",
-      vlmKeyHint: "密钥只写不读：留空保持当前值，填写并保存即覆盖，之后不再展示。",
-      vlmKeyEnv: "Key 环境变量（apiKey 为空时读取）",
-      ocr: "默认 OCR 引擎",
-      ocrWindows: "windows（系统内置，无需安装）",
-      ocrMacos: "macos（macOS 原生 Vision，免装第三方，首次需编译）",
-      ocrPaddle: "paddle（PaddleOCR，对发光/弯曲/游戏文字更好）",
-      ocrRapid: "rapid（RapidOCR，轻量快速，选装）",
-      debug: "调试日志（llm/stream 图片桥与模型缓存读取的诊断输出）",
-      advanced: "高级设置",
-      vlmTimeoutMs: "视觉请求超时（毫秒）",
-      vlmMaxTokens: "视觉最大输出 Tokens",
-      bridgeExportDir: "图片桥导出目录（空 = 系统临时目录）",
-      maxImageBytes: "单张图片大小上限（字节）",
-      scanDefaultSize: "扫描默认格子大小（8..64）",
-      scanPalette: "默认色板（auto/full/basic/gray）",
-      scanMode: "默认扫描模式（auto/ascii/color）",
-      ocrLanguage: "OCR 默认语言（BCP-47，如 zh-Hans / en-US）",
-      multimodalModels: "多模态白名单（逗号分隔，这些模型直收图片不降级）",
-      requestGuard: "请求保护（图片块降级兜底）",
-      batchProbeFirst: "批量探测前几张（判断是否文字密集）",
-      batchOcrLimitChars: "批量 OCR 截断字符数",
-      docDpi: "文档转换 DPI（72..300）",
-      docMaxPages: "文档转换最大页数（1..500）",
-      debug: "调试日志（输出诊断信息）",
-      save: "保存",
-      reset: "恢复默认",
-      saved: "已保存",
-      saving: "保存中…",
-      error: "保存失败",
-      unavailable: "设置命名空间不可用（服务端未注册 picturereader 命名空间？）",
-      loading: "加载中…",
-      noModels: "暂无可用模型（重启 DSH 后自动扫描）",
-    };
     var en = {
       nav: "Picture Reader",
       intro: "picturereader: local image understanding for text-only models. Pick a usage mode; check models to give them a vision variant; configure external vision endpoint (optional). Settings hot-apply, vision bridge requires DSH restart.",
@@ -158,11 +111,6 @@ window.__ModuleLoader__.load({
       vlmKey: "Vision API Key",
       vlmKeyHint: "Write-only key: leave blank to keep current, fill & save to overwrite, never echoed again.",
       vlmKeyEnv: "Key env var (used when apiKey empty)",
-      ocr: "Default OCR Engine",
-      ocrWindows: "windows (built-in, no install)",
-      ocrMacos: "macos (macOS built-in Vision, no third-party install; one-time compile)",
-      ocrPaddle: "paddle (PaddleOCR, best for glowing/curved/game text)",
-      ocrRapid: "rapid (RapidOCR, lightweight, optional)",
       debug: "Debug logging (llm/stream bridge & model-cache reads)",
       advanced: "Advanced",
       vlmTimeoutMs: "Vision request timeout (ms)",
@@ -196,22 +144,7 @@ window.__ModuleLoader__.load({
       { value: "smart", labelKey: "modeSmart" },
       { value: "strict", labelKey: "modeStrict" },
     ];
-    // 平台条件：windows OCR 引擎仅在 Windows 显示，macos OCR 引擎仅在
-    // macOS 显示（paddle / rapid 为跨平台选装，始终显示）。DEFAULT_OCR 作为
-    // 「未配置时的平台原生默认」，与 src 侧引擎缺失时的平台降级目标一致。
-    var OCR_PLATFORM = (function () {
-      if (typeof navigator === "undefined") return null;
-      var ua = String(navigator.userAgent || "");
-      if (/Mac|iPhone|iPad|iPod/i.test(ua)) return "macos";
-      if (/Win/i.test(ua)) return "windows";
-      return null;
-    })();
-    var DEFAULT_OCR = OCR_PLATFORM === "macos" ? "macos" : (OCR_PLATFORM === "windows" ? "windows" : "paddle");
-    var OCR_OPTS = []
-      .concat(OCR_PLATFORM === "windows" ? [{ value: "windows", labelKey: "ocrWindows" }] : [])
-      .concat(OCR_PLATFORM === "macos" ? [{ value: "macos", labelKey: "ocrMacos" }] : [])
-      .concat([{ value: "paddle", labelKey: "ocrPaddle" }, { value: "rapid", labelKey: "ocrRapid" }]);
-    // FIELDS: mode, vision_models (custom), vlm_enabled (checkbox), vlm_*, ocr_engine, advanced
+    // FIELDS: mode, vision_models (custom), vlm_enabled (checkbox), vlm_*, advanced
     var FIELDS = [
       { key: "mode", type: "mode" },
       { key: "vision_models", type: "models" },
@@ -220,7 +153,6 @@ window.__ModuleLoader__.load({
       { key: "vlm_model", type: "text", labelKey: "vlmModel" },
       { key: "vlm_key", type: "password", secret: true, labelKey: "vlmKey", hintKey: "vlmKeyHint" },
       { key: "vlm_key_env", type: "text", labelKey: "vlmKeyEnv" },
-      { key: "ocr_engine", type: "ocr" },
       { key: "vlm_timeout_ms", type: "number", advanced: true, labelKey: "vlmTimeoutMs" },
       { key: "vlm_max_tokens", type: "number", advanced: true, labelKey: "vlmMaxTokens" },
       { key: "bridge_export_dir", type: "text", advanced: true, labelKey: "bridgeExportDir" },
@@ -239,7 +171,7 @@ window.__ModuleLoader__.load({
     ];
     var FIELD_LABELS = {
       mode: "mode", vlm_enabled: "vlmEnabled", vlm_base: "vlmBase", vlm_model: "vlmModel", vlm_key: "vlmKey",
-      vlm_key_env: "vlmKeyEnv", ocr_engine: "ocr",
+      vlm_key_env: "vlmKeyEnv",
       vlm_timeout_ms: "vlmTimeoutMs", vlm_max_tokens: "vlmMaxTokens", bridge_export_dir: "bridgeExportDir",
       max_image_bytes: "maxImageBytes", scan_default_size: "scanDefaultSize", scan_palette: "scanPalette",
       scan_mode: "scanMode", ocr_language: "ocrLanguage", multimodal_models: "multimodalModels",
@@ -351,7 +283,8 @@ window.__ModuleLoader__.load({
         return entry ? (entry.note || "") : "";
       };
 
-      // 标题与说明由外层卡片渲染，这里只负责模型勾选列表。
+      // The surrounding card renders the title and hint; this is only the
+      // model checkbox list.
       return available.length === 0
         ? h("p", { className: "__pr_empty" }, t("noModels"))
         : h("div", { className: "__pr_modelList" },
@@ -443,7 +376,7 @@ window.__ModuleLoader__.load({
         // Persist exactly what the form shows RIGHT NOW. We deliberately do not
         // "skip a write when the draft equals the resolved snapshot": that
         // skip-by-equality silently dropped every field whenever the form state
-        // matched the loaded defaults (the UI still reported 已保存 while writing
+        // matched the loaded defaults (the UI still reported "saved" while writing
         // nothing), so all main settings reverted to defaults on reopen. Instead
         // every non-model field is written unconditionally from its current form
         // value; writes go through the same shared scope as vision_models, so the
@@ -460,9 +393,10 @@ window.__ModuleLoader__.load({
             ops.push({ op: "set", key: f.key, value: draft[f.key] !== void 0 ? !!draft[f.key] : Boolean(value[f.key]) });
             return;
           }
-          // For select fields (mode, ocr_engine), use draft value if touched, otherwise use current value
-          if (f.type === "mode" || f.type === "ocr") {
-            var selectVal = draft[f.key] !== void 0 ? draft[f.key] : (value[f.key] || (f.type === "mode" ? "smart" : DEFAULT_OCR));
+          // The mode dropdown keeps its own resolution: the draft when the
+          // user touched it, otherwise the stored value with a safe default.
+          if (f.type === "mode") {
+            var selectVal = draft[f.key] !== void 0 ? draft[f.key] : (value[f.key] || "smart");
             if (selectVal) ops.push({ op: "set", key: f.key, value: selectVal });
             return;
           }
@@ -495,8 +429,9 @@ window.__ModuleLoader__.load({
         });
         Promise.all(writes).then(function () {
           setBusy(false); setNotice(t("saved"));
-          // 保存后刷新本机 snapshot：优先走宿主 load（若提供），否则直接
-          // 读 getSnapshot（兼容无 load 的 EAC 宿主）。
+          // Refresh the local snapshot after saving: prefer the host load()
+          // when available, otherwise read getSnapshot() directly (hosts
+          // without a load surface).
           if (typeof scope.load === "function") {
             scope.load();
           } else {
@@ -548,22 +483,6 @@ window.__ModuleLoader__.load({
             h("p", { className: "__pr_hint" }, t("modeHint"))
           );
         }
-        if (f.type === "ocr") {
-          // 存储值未在当前平台可用的选项中时，回落到平台原生默认引擎，
-          // 避免 select 空白（例如跨平台迁移后的旧配置）。
-          var ocrDisplay = fieldDraft(f);
-          if (OCR_OPTS.every(function (o) { return o.value !== ocrDisplay; })) ocrDisplay = DEFAULT_OCR;
-          return h("label", { key: f.key, className: "__pr_field" },
-            h("span", { className: "__pr_label" }, t("ocr")),
-            h("select", {
-              className: "__pr_input",
-              value: ocrDisplay,
-              onChange: function (e) { setField(f, e.target.value); },
-            }, OCR_OPTS.map(function (o) {
-              return h("option", { key: o.value, value: o.value }, t(o.labelKey));
-            }))
-          );
-        }
         return h("label", { key: f.key, className: "__pr_field" },
           h("span", { className: "__pr_label" }, t(FIELD_LABELS[f.key])),
           h("input", {
@@ -583,15 +502,15 @@ window.__ModuleLoader__.load({
 
       return h("div", { className: "__pr_section" },
         h("p", { className: "__pr_intro" }, t("intro")),
-        // 使用模式（自带 label，无需卡片标题）
+        // Usage mode (renders its own label, so no card title).
         h("div", { className: "__pr_card" }, renderField(FIELDS[0])),
-        // 视觉桥模型
+        // Vision bridge models.
         h("div", { className: "__pr_card" },
           h("h3", { className: "__pr_cardTitle" }, t("visionBridgeModels")),
           h("p", { className: "__pr_subHint" }, t("visionBridgeModelsHint")),
           h(VisionBridgePicker, { t: t, scope: scope, onDraft: function (v) { setDraft(function (prev) { var n = Object.assign({}, prev); n["vision_models"] = v; return n; }); } })
         ),
-        // 外部视觉 API
+        // External vision API.
         h("div", { className: "__pr_card" },
           renderField(FIELDS[2]),
           vlmHidden ? null : h("div", { className: "__pr_advancedBody" },
@@ -600,9 +519,7 @@ window.__ModuleLoader__.load({
             })
           )
         ),
-        // OCR 引擎（自带 label，无需卡片标题）
-        h("div", { className: "__pr_card" }, renderField(FIELDS[7])),
-        // 高级设置
+        // Advanced settings.
         advanced.length ? h("details", { className: "__pr_advanced" },
           h("summary", { className: "__pr_advancedSummary" }, t("advanced")),
           h("div", { className: "__pr_advancedBody" },
@@ -631,7 +548,7 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       var t = ctx.locale.bind(NS);
-      ctx.effect(function () { return ctx.locale.register(NS, { zh: zh, en: en }); }, "picturereader: dictionaries");
+      ctx.effect(function () { return ctx.locale.register(NS, { en: en }); }, "picturereader: dictionaries");
       var scope = ctx.settingsScope.bind({ namespace: NS });
       ctx.slots.inject("settings.section", function () {
         return ctx.slots.register({

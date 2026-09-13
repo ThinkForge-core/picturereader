@@ -38,7 +38,7 @@ test('renderSample: prints exact RGB rows with stats', () => {
   const rgba = makeQuadrantRgba();
   const sample = samplePixels(rgba, 100, 100, [0, 0, 0.5, 0.5], 4);
   const text = renderSample({
-    path: 'C:\\img\\a.png',
+    path: '/img/a.png',
     region: '0,0,0.5,0.5',
     width: sample.width,
     height: sample.height,
@@ -48,7 +48,7 @@ test('renderSample: prints exact RGB rows with stats', () => {
     contrast: sample.contrast,
     distinct: sample.distinct
   });
-  assert.match(text, /texture sample: C:\\img\\a\.png region 0,0,0\.5,0\.5 \(50x50 px, 4x4 exact pixels/);
+  assert.match(text, /texture sample: \/img\/a\.png region 0,0,0\.5,0\.5 \(50x50 px, 4x4 exact pixels/);
   assert.match(text, /\(216,27,27\)/);
   assert.match(text, /stats: local contrast 0 -> smooth/);
 });
@@ -59,7 +59,7 @@ function makeFakeCtx(bytes) {
     tools: { register() {} },
     emit(...args) { emitted.push(args); },
     fs: {
-      async resolve(path) { return { targetKey: `C:\\img\\${path}`, displayPath: `C:\\img\\${path}` }; },
+      async resolve(path) { return { targetKey: `/img/${path}`, displayPath: `/img/${path}` }; },
       async stat() { return { version: 'v1', type: 'file', size: bytes.length }; },
       async readBytes() { return bytes; }
     }
@@ -67,7 +67,7 @@ function makeFakeCtx(bytes) {
   return { ctx, emitted };
 }
 
-const EXEC = { signal: undefined, agent: { session: { header: { cwd: 'C:\\work' } } } };
+const EXEC = { signal: undefined, agent: { session: { header: { cwd: '/work' } } } };
 
 test('image_sample tool: executes and renders', async () => {
   const rgba = makeQuadrantRgba();
@@ -80,7 +80,7 @@ test('image_sample tool: executes and renders', async () => {
   assert.equal(emitted.length, 1);
   assert.equal(emitted[0][0], 'fs/observed');
   const text = tool.output.render({}, result).map((p) => p.text).join('\n');
-  assert.match(text, /texture sample: C:\\img\\a\.png/);
+  assert.match(text, /texture sample: \/img\/a\.png/);
 });
 
 test('image_sample tool: validation', async () => {

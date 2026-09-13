@@ -7,9 +7,9 @@
  *
  * Supported inputs: .pdf / .docx / .doc / .xlsx / .xls / .pptx / .ppt
  *
- * Conversion chain (runs in the isolated doc_venv Python via scripts/
- * doc-to-image.py so the timeouts / page caps / LibreOffice handling stay in
- * one reusable place):
+ * Conversion chain (runs in the installer-managed `media` Python environment
+ * via scripts/doc-to-image.py so the timeouts / page caps / LibreOffice
+ * handling stay in one reusable place):
  *
  *   .pdf  ──────────────►  PyMuPDF(fitz) render each page to PNG
  *   office  ──LibreOffice──► PDF ──fitz──► PNG
@@ -17,11 +17,12 @@
  *
  * Environment requirements (checked at runtime, with clear messages instead
  * of crashes):
- *   - doc_venv at `C:\Users\Administrator\doc_venv\Scripts\python.exe` with
- *     pymupdf installed  → else hint "run node scripts/setup-doc-venv.mjs".
- *   - LibreOffice soffice.exe  → read from `DSH_SOFFICE` env, default
- *     `C:/Program Files/LibreOffice/program/soffice.exe` (glob-fallback for
- *     case). Missing → hint to install LibreOffice / set DSH_SOFFICE.
+ *   - the `media` venv with pymupdf installed — its interpreter comes from
+ *     `DSH_MEDIA_PYTHON`, the installer state file, or the default venv
+ *     prefix; otherwise the tool points at `python3 scripts/install.py`.
+ *   - LibreOffice `soffice`, resolved by `paths.sofficePath()`
+ *     (`DSH_SOFFICE` -> state file -> PATH -> known locations). Missing ->
+ *     the error names the package to install.
  *
  * @module picturereader/doc-tools
  */
@@ -32,12 +33,11 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { mediaPython, sofficePath, installHint } from './paths.js';
+import { defaultOutputDir, missingFileHint } from './workspace-paths.js';
 
 /** Absolute path to scripts/doc-to-image.py (this module lives in src/). */
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'doc-to-image.py');
-
-/** The isolated venv python used to run the conversion chain (env overridable). */
-const DOC_VENV_PY = process.env.DSH_DOC_PYTHON ?? 'C:\\Users\\Administrator\\doc_venv\\Scripts\\python.exe';
 
 /** Hard cap on how many bytes we read into memory per input document. */
 const MAX_INPUT_BYTES = 512 * 1024 * 1024; // 512 MB
@@ -64,8 +64,8 @@ function resolveOutDir(raw, fingerprint, cwd) {
     // Resolve relative paths against the session cwd like other tools.
     return cwd ? pathResolve(cwd, p) : pathResolve(p);
   }
-  const stamp = fingerprint && fingerprint !== 'anon' ? fingerprint : 'anon';
-  return join(tmpdir(), 'picturereader-doc', stamp, `${Date.now()}-${randomBytes(4).toString('hex')}`);
+  return join(defaultOutputDir('doc', { cwd, stamp: fingerprint }),
+    `${Date.now()}-${randomBytes(4).toString('hex')}`);
 }
 
 /**
@@ -74,11 +74,14 @@ function resolveOutDir(raw, fingerprint, cwd) {
  */
 function runDocPython(inputPath, outDir, prefix, dpi, maxPages, timeoutMs, signal) {
   throwIfAborted(signal);
+  const python = mediaPython();
   const args = [SCRIPT_PATH, inputPath, outDir, prefix, String(dpi), String(maxPages)];
-  const res = spawnSync(DOC_VENV_PY, args, {
+  const soffice = sofficePath();
+  const res = spawnSync(python, args, {
     encoding: 'utf8',
     timeout: timeoutMs,
     maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, ...(soffice !== null ? { DSH_SOFFICE: soffice } : {}) },
     ...(signal ? { signal } : {}),
   });
   if (res.error) {
@@ -87,36 +90,37 @@ function runDocPython(inputPath, outDir, prefix, dpi, maxPages, timeoutMs, signa
     }
     if (res.error.code === 'ENOENT') {
       throw new Error(
-        `document_to_image: 转换所需的 Python 环境缺失。请先运行 \`node scripts/setup-doc-venv.mjs\` 创建 doc_venv（位于 ${DOC_VENV_PY}）。`
+        `document_to_image: the Python environment for conversion is missing (expected interpreter: ${python}). ${installHint()}.`
       );
     }
     if (res.error.code === 'ETIMEDOUT') {
-      throw new Error('document_to_image: 转换超时（>120s），请检查文档是否损坏、过大，或降低 max_pages / dpi。');
+      throw new Error('document_to_image: conversion timed out (>120s) — check whether the document is damaged or too large, or lower max_pages / dpi.');
     }
-    throw new Error(`document_to_image: 调用转换脚本失败: ${res.error.message}`);
+    throw new Error(`document_to_image: cannot run the conversion script: ${res.error.message}`);
   }
   if (res.signal && res.signal === 'SIGTERM' && signal?.aborted) {
     throw new Error('document_to_image: cancelled');
   }
   if (res.signal || res.status === null) {
-    throw new Error('document_to_image: 转换进程被终止（超时或中断）');
+    throw new Error('document_to_image: the conversion process was terminated (timeout or interrupt)');
   }
   if (res.status !== 0 || !res.stdout) {
-    // 失败或空输出：脚本以非零状态退出，stderr/stdout 里有 JSON error。
+    // Failure (or empty output): the script exits non-zero and puts a JSON
+    // error object on stdout/stderr.
     const body = (res.stderr || res.stdout || '').trim();
     let msg = body;
     try {
       const parsed = JSON.parse(body.split('\n')[0]);
       if (parsed && parsed.error) msg = parsed.error;
     } catch { /* body is raw text */ }
-    throw new Error(`document_to_image: 转换失败: ${msg || `退出码 ${res.status}`}`);
+    throw new Error(`document_to_image: conversion failed: ${msg || `exit code ${res.status}`}`);
   }
-  // 成功路径：解析最后一行 JSON（脚本只打印一行 JSON）。
+  // Success path: parse the last JSON line (the script prints exactly one).
   const line = res.stdout.trim().split('\n').filter(Boolean).pop();
   try {
     return JSON.parse(line);
   } catch (e) {
-    throw new Error(`document_to_image: 无法解析转换脚本输出: ${e.message}`);
+    throw new Error(`document_to_image: cannot parse the conversion script output: ${e.message}`);
   }
 }
 
@@ -138,7 +142,7 @@ export function createDocumentToImageTool(ctx) {
         'pages: [{ index, path, width, height, bytes }], out_dir (where the PNGs live), and a summary.',
       'The PNGs remain on disk in out_dir so subsequent image_scan / image_ocr calls can read them by path.',
       'PDFs render directly with PyMuPDF; other Office formats are first converted to PDF via headless LibreOffice. ' +
-        'Requires the doc_venv Python (pymupdf) and LibreOffice — if either is missing the tool returns a clear setup hint.'
+        'Requires the plugin Python environment (pymupdf) and LibreOffice — if either is missing the tool returns a clear setup hint.'
     ].join(' '),
     parameters: {
       type: 'object',
@@ -223,7 +227,7 @@ export function createDocumentToImageTool(ctx) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       throwIfAborted(exec.signal);
-      // ---- 参数收集与校验 ----
+      // ---- argument collection and validation ----
       const dpi = parseBoundedInt(args.dpi, 150, 72, 300, 'dpi');
       const maxPages = parseBoundedInt(args.max_pages, 50, 1, 500, 'max_pages');
 
@@ -232,18 +236,19 @@ export function createDocumentToImageTool(ctx) {
         ? args.file_paths.filter((x) => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim())
         : [];
       if (fp.length > 0 && fps.length > 0) {
-        throw new Error('document_to_image: 请只传 file_path（单个）或 file_paths（批量），不要同时传两者。');
+        throw new Error('document_to_image: pass either file_path (single) or file_paths (batch), not both');
       }
       const targets = fp.length > 0 ? [fp] : fps;
       if (targets.length === 0) {
-        throw new Error('document_to_image: 需要一个输入文件（file_path 或 file_paths）。');
+        throw new Error('document_to_image: an input document is required (file_path or file_paths)');
       }
 
       const cwd = exec.agent?.session?.header?.cwd;
       const fingerprint = (exec.agent?.session?.id) || 'anon';
       const outDir = resolveOutDir(args.out_dir, fingerprint, cwd);
 
-      // 预解析目标：解析路径、校验扩展名、读字节并落盘到临时目录（python 需真实本地路径）。
+      // Pre-resolve every target: verify the extension, read the bytes and
+      // materialize them in a temp dir (the Python side needs a real path).
       const materialized = []; // { ext, localPath, displayPath }
       for (const rawPath of targets) {
         throwIfAborted(exec.signal);
@@ -255,14 +260,15 @@ export function createDocumentToImageTool(ctx) {
         const ext = extname(display).toLowerCase();
         if (!SUPPORTED_EXTS.has(ext)) {
           throw new Error(
-            `document_to_image: 不支持的文件类型 "${ext}"（支持: pdf / docx / doc / xlsx / xls / pptx / ppt）: ${display}`
+            `document_to_image: unsupported document type "${ext}" (supported: pdf / docx / doc / xlsx / xls / pptx / ppt): ${display}`
           );
         }
         const info = await ctx.fs.stat(target, exec.signal);
-        if (!info) throw new Error(`document_to_image: 找不到文件: ${display}`);
-        if (info.type !== 'file') throw new Error(`document_to_image: 不是普通文件: ${display}`);
+        if (!info) throw new Error(`document_to_image: file not found: ${display}${missingFileHint(display)}`);
+        if (info.type !== 'file') throw new Error(`document_to_image: not a regular file: ${display}`);
         const bytes = await ctx.fs.readBytes(target, exec.signal, MAX_INPUT_BYTES);
-        // 落盘：临时目录 + 保留原扩展名（python 靠扩展名判断链路）。
+        // Materialize into a temp dir, keeping the extension: the Python side
+        // picks the conversion chain by extension.
         const tmpDir = mkdtempSync(join(tmpdir(), 'picturereader-src-'));
         const localPath = join(tmpDir, `${pathBasename(display) || 'doc'}${Date.now()}-${randomBytes(2).toString('hex')}${ext}`);
         writeFileSync(localPath, bytes);
@@ -270,13 +276,14 @@ export function createDocumentToImageTool(ctx) {
       }
 
       const documents = [];
-      // 可注入 seam：测试可传 ctx._docRunner 替换真实 spawn（与 image-batch 的 ctx.ocrImage 注入一致）。
+      // Injectable seam: tests may pass ctx._docRunner to replace the real spawn
+      // (same pattern as the ctx.ocrImage injection used by image_batch).
       const runner = (typeof ctx._docRunner === 'function') ? ctx._docRunner : runDocPython;
       try {
         for (let i = 0; i < materialized.length; i += 1) {
           throwIfAborted(exec.signal);
           const { ext, localPath, displayPath } = materialized[i];
-          const prefix = `page_${i + 1}`; // 每文档一个独立前缀，批量时同 base 名互不覆盖
+          const prefix = `page_${i + 1}`; // one prefix per document so equal basenames never collide
           const summary = runner(localPath, outDir, prefix, dpi, maxPages, 120_000, exec.signal);
           if (summary.error) {
             throw new Error(`document_to_image: ${summary.error}`);
@@ -296,7 +303,8 @@ export function createDocumentToImageTool(ctx) {
           });
         }
       } finally {
-        // 清理源文件的临时落盘（PNG 输出保留在 out_dir 供后续工具读）。
+        // Clean up the materialized sources (the PNG output stays in out_dir
+        // so later tools can read it).
         for (const m of materialized) {
           try {
             rmSync(m.tmpDir, { recursive: true, force: true });
@@ -307,20 +315,20 @@ export function createDocumentToImageTool(ctx) {
       const totalPages = documents.reduce((s, d) => s + d.rendered, 0);
       const truncatedAny = documents.some((d) => d.truncated);
       const summary =
-        `转换完成：${documents.length} 个文档，共渲染 ${totalPages} 页 PNG，输出目录 ${outDir}。` +
-        (truncatedAny ? ' 部分文档超过 max_pages 仅渲染前 N 页，如需更多页请分批（提高 max_pages 或缩小 dpi）。' : '');
+        `Converted ${documents.length} document(s), rendered ${totalPages} PNG page(s), output directory ${outDir}.` +
+        (truncatedAny ? ' Some documents exceeded max_pages and only the first pages were rendered; raise max_pages or lower dpi to get more.' : '');
 
       return {
         documents,
         out_dir: outDir,
         summary,
-        note: '每页 PNG 可直接用 image_scan / image_ocr / image_sample / vision_analyze 按 pages[].path 分析。'
+        note: 'Every page PNG can be analyzed directly with image_scan / image_ocr / image_sample / vision_analyze by passing pages[].path.'
       };
     }
   };
 }
 
-// 注册工厂，与 more-tools.js 的 registerMoreTools 风格一致（主会话按需调用）。
+// Registration factory, mirroring registerMoreTools in more-tools.js.
 export function registerDocTools(ctx) {
   ctx.tools.register(createDocumentToImageTool(ctx));
 }

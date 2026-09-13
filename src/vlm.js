@@ -309,7 +309,6 @@ async function startLocalServer(config) {
   const child = spawn(config.serverExe, buildServerArgs(config), {
     detached: true,
     stdio: 'ignore',
-    windowsHide: true,
   });
   child.unref();
   serverChild = child;

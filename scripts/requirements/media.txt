@@ -1,0 +1,9 @@
+# Interpreter: the project's Python environment used by BOTH document_to_image
+# (PyMuPDF) and image_edit (Pillow + OpenCV + piexif).
+#
+# Pinned for reproducible installs. Run scripts/install.py --locked to require
+# the hashes from the matching *.lock.txt file.
+pymupdf==1.28.2
+Pillow==12.3.0
+opencv-python-headless==5.0.0.93
+piexif==1.1.3

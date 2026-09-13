@@ -3,117 +3,132 @@ name: image-reading
 description: Read and understand images like a multimodal model using the picturereader tools (image_scan / image_ocr / image_sample). Applies a verified 5-step workflow (global tone → find subjects → verify text → judge material → synthesize) guided by grounded principles and cross-image insights. Use whenever you need to look at an image.
 ---
 
-# 读图方法论（image-reading）
+# Image-reading methodology (image-reading)
 
-目标：**像多模态模型一样"看"图并输出连贯描述**，每个结论可追溯、可验证。
-本 skill 由 experience / skill / principle / insight 四层知识构成（按
-Gogomoe 知识框架分类，教训均来自对真实图片的实测复盘）。
+Goal: **"see" an image like a multimodal model and produce a coherent description**, where
+every conclusion is traceable and verifiable.
+This skill is built from four layers of knowledge — experience / skill / principle / insight
+(classified with the Gogomoe knowledge framework; every lesson comes from a post-mortem of real image runs).
 
-## 操作流程（skill）
+## Where the image must live
 
-### 1. 全局定调（第一轮扫描）
+Pass a path inside the **session workspace** (a relative path resolves against the session
+cwd). Do **not** stage the file in `/tmp`: inside the DSH file sandbox `/tmp` is a private
+tmpfs that is discarded when the shell command exits, so a screenshot written there by a
+command is `file not found` for these tools even though the command succeeded. Crop and
+edit outputs default to `<workspace>/.picturereader/...`, readable from both sides.
 
-用默认参数（size=40）全图扫描，读四个字段：
-- **`hue families`（最高优先级）**：按纯色相分族的真实占比。暗调/低饱和场景的
-  真实颜色只在这里——`colors by area` 灰白占比高不代表画面灰白。
-- **`structure`**：平行条带/对称性（解读见 insights）。
-- **`texture`**：rough 高=写实照片；smooth 高=扁平或水面/天空/雾（见 insights）。
-- **`regions`**：大结构的位置/大小/颜色。
+## Workflow (skill)
 
-### 2. 找主体（全局→局部，主动验证）
+### 1. Set the global tone (first scan)
 
-- 对**颜色异常区、深色大块、相邻竖长色块、小色块密集区**用 `px_per_cell` 定向放大
-  （值越小越细：8-12 看轮廓，4-6 看结构，2-3 看细节；区域不够小时工具会提示实际密度，缩小 focus/region 重试）。
-- 放大后按**形状**解读：头+肩+躯干=人物；弧线+对称明暗=圆柱/球/装置；
-  竖直细长结构=石柱/塔/杆；交替细条=面板/栅格。
-- **主体可能与背景低对比而"隐形"**（见 insights 4）——怀疑处必须放大确认，不能因 regions 未单列就跳过。
+Scan the whole image with the default parameters (size=40) and read four fields:
+- **`hue families` (highest priority)**: the true share of each pure hue family. In dark or low-saturation
+  scenes the real colours appear only here — a high grey/white share in `colors by area` does not mean the
+  image is grey and white.
+- **`structure`**: parallel bands / symmetry (interpretation in insights).
+- **`texture`**: high rough = realistic photograph; high smooth = flat artwork or water/sky/fog (see insights).
+- **`regions`**: position / size / colour of large structures.
 
-### 3. 文字验证
+### 2. Find the subject (global → local, verify actively)
 
-- 疑似文字/标识/UI → `image_ocr`（region/focus 限定）。
-- Windows 引擎读不出但怀疑有字 → `engine="paddle"` 重试（发光/弯曲/游戏渲染文字）。
-- **OCR 结果优先于模型描述**（见 insights 3）。
+- For **oddly coloured areas, large dark blocks, adjacent tall thin colour blocks, dense clusters of small colour blocks**,
+  zoom in with `px_per_cell` (smaller value = finer: 8-12 for outlines, 4-6 for structure, 2-3 for detail; if the region
+  is too small the tool reports the actual density — shrink focus/region and retry).
+- Read the zoomed view by **shape**: head + shoulders + torso = a person; arcs + symmetric light and shade = cylinder/sphere/installation;
+  vertical thin structures = stone pillar/tower/pole; alternating thin bands = panel/grille.
+- **A subject can be "invisible" because it has low contrast against the background** (see insights 4) — anything suspected must be
+  zoomed into and confirmed; never skip it just because regions did not list it separately.
 
-### 4. 材质判断
+### 3. Verify text
 
-`image_sample` 对小块区域 8×8 取样，看 RGB 分布与 contrast 统计
-（平滑渐变=天空/皮肤/水面；高对比条纹=金属/木纹；暗绿 G>R>B=植物/涂装）。
+- Suspected text / signage / UI → `image_ocr` (restricted with region/focus).
+- If an OCR pass returns no text but you can still see characters → retry on a tighter region (glowing, curved, game-rendered text).
+- **OCR results take precedence over the model's description** (see insights 3).
 
-### 5. 综合描述
+### 4. Judge the material
 
-输出连贯描述（场景/主体/环境光线/细节），**每个结论标注证据等级**：
-实锤（有像素/OCR/取样数据）vs 推断（基于结构推测，用"看起来像"）。
-优先引用具体数字；不确定就说不确定，绝不编造。
+Use `image_sample` to take an 8×8 sample of a small area and read the RGB distribution and the contrast statistics
+(smooth gradients = sky/skin/water; high-contrast stripes = metal/wood grain; dark green with G>R>B = vegetation/paint).
 
-## 行为准则（principles）
+### 5. Synthesize the description
 
-1. **证据分级**：任何结论标注"实测"或"推断"；推断必须说明依据。
-2. **数字优先**：用具体指标（"蓝色调 74%""对称 80%""OCR 读出 1.00"）支撑描述，不用模糊形容词代替。
-3. **先全局后局部**：第一轮定调，第二轮定向放大验证，不跳步。
-4. **怀疑即验证**：对任何"可能漏掉的主体"，用放大/取样/OCR 验证后再下结论。
-5. **不编造**：不确定就说明；模型（含多模态）的描述不可直接当作事实（见 insights 3）。
+Output a coherent description (scene / subject / ambient light / details), **labelling the evidence level of
+every conclusion**: hard fact (backed by pixel/OCR/sample data) vs inference (inferred from structure, phrased as "looks like").
+Quote concrete numbers where you can; if you are unsure, say you are unsure, and never fabricate.
 
-## 规律性洞察（insights，跨图归纳）
+## Behavioural principles (principles)
 
-1. **暗调场景的真实颜色只在 hue families 里**：低饱和/暗色调（暮色、雾中、夜景）
-   会被 14 色色板压成灰黑，`colors` 的灰白占比是假象——hue families 按纯色相分族不受影响。
-2. **高对称 ≠ 一定人造物**：水面倒影/镜像构图也高度对称。区分看：平滑大面积
-   （水面/天空 smooth 高）+ 水天分界线（上亮下暗、上下镜像）+ 竖直细长结构（石柱）
-   = 湖泊/自然镜像；纹理复杂、颜色单调、几何硬边 = 人造建筑/装置。
-3. **小模型读小字不可靠**：多模态小模型对低分辨率文字会幻觉（全图"读出"内容、
-   裁剪后承认没有）；发光/弯曲/艺术字 Windows OCR 也失效——**文字一律以 OCR 实读为准**。
-4. **低对比主体"隐形"**：暗色物体（如深色服装人物）在暗背景中融入背景黑块，
-   粗网格和 regions 都不会标出——对深色区域主动放大是唯一可靠发现方式。
-5. **平滑大面积 ≠ 扁平简笔画**：水面、天空、雾气、墙面都平滑（smooth 高），
-   需结合色调/结构/场景判断，不能仅凭 smooth 判定"扁平"。
-6. **"像什么"和"是什么"要分开**：结构证据（对称/形状/色调）支撑"像什么"；
-   "是什么"需要 OCR/取样/更强证据，不满足时保持推断。
-7. **hue families 是场景类型指纹**（34 张图训练归纳）：
-   - cyan 高（>60%）= 水/雾/湖泊/晨雾场景（东方水景、浓雾遗址）
-   - green 高（>40%）= 森林/竹林/草地/苔藓
-   - orange 或 red 高 = 红披风/暖色服饰人物、火光、晚霞
-   - blue 高（>70%）= 夜晚/冷色科幻场景
-   - achromatic 高 + rough 高 = 废墟/岩石/暗环境
-   - green + yellow 双高 = 翠绿能量带/发光植被/浮空仙境
-   - 对称高 + 中央竖直结构 = 中央主体（瀑布/树/大门）居中构图
-8. **多模态模型的颜色描述对"发光/能量"不可靠**（训练中反复出现）：把实测为
-   cyan/blue/green 的冷色发光（屏幕光、能量屏障、雾中光柱）系统性说成"粉红/紫色"。
-   发光元素的颜色一律以 hue 实测为准。
-9. **人物识别信号**：orange/red 主调 + 局部暖色小块 + 对称 = 人物服饰候选；
-   游戏角色常穿红/橙（红披风、红发、暖色战斗服），识别到暖色主调时应主动放大找人物。
-10. **品牌/游戏名/标题文字**：多模态模型会猜错（"原神""崩坏3"实际是明日方舟终末地），
-   必须 PaddleOCR 实读（游戏 HUD 底部常带游戏名/参数/水印）。
+1. **Grade the evidence**: label every conclusion "measured" or "inferred"; an inference must state what it rests on.
+2. **Numbers first**: support descriptions with concrete metrics ("blue tone 74%", "symmetry 80%", "OCR read 1.00") rather than vague adjectives.
+3. **Global before local**: the first pass sets the tone, the second pass zooms in to verify — do not skip steps.
+4. **Suspect it, verify it**: for any "subject that may have been missed", verify with zoom/sampling/OCR before concluding.
+5. **Do not fabricate**: say so when unsure; a model's description (multimodal models included) cannot be taken as fact directly (see insights 3).
 
-## 案例参考（experience，简短）
+## Regularities (insights, induced across images)
 
-- 湖泊仙侠图：对称 97% 被误判为"人造立面"，实为水面倒影+湖中石柱+粉紫雾气
-  → 教训沉淀为 insight 2。
-- 游戏发光标语图：Windows OCR 12 格全空、多模态幻觉"问问答写"，
-  PaddleOCR 一次读出「勇于探索叩问苍穹」→ 教训沉淀为 insight 3。
-- 暗背景人物图：黑服人物融入背景被漏检，px_per_cell=3 放大后头肩躯干清晰
-  → 教训沉淀为 insight 4。
+1. **In dark scenes the real colours live only in hue families**: low-saturation/dark tones (dusk, fog, night scenes)
+   get flattened to grey-black by the 14-colour palette, so the grey/white share in `colors` is an illusion — hue families
+   split by pure hue and are unaffected.
+2. **High symmetry ≠ man-made for sure**: water reflections and mirror compositions are highly symmetric too. To tell them apart, look at:
+   large smooth areas (water/sky with high smooth) + a water-sky separation line (bright above, dark below, mirrored top-to-bottom)
+   + vertical thin structures (stone pillars) = lake/natural mirror; complex texture, monotonous colour, hard geometric edges = man-made building/installation.
+3. **A small model cannot be trusted with small text**: a small multimodal model hallucinates on low-resolution text (it "reads" content
+   from the full image and admits there is none after cropping); glowing/curved/stylised lettering defeats OCR as well — **text must always
+   be taken from what OCR actually reads**.
+4. **Low-contrast subjects go "invisible"**: a dark object (a figure in dark clothing, say) merges into a dark background block,
+   and neither the coarse grid nor regions marks it — actively zooming into dark areas is the only reliable way to find it.
+5. **Large smooth areas ≠ flat line art**: water, sky, mist and walls are all smooth (high smooth),
+   so judge them together with tone/structure/scene; never call something "flat" on smooth alone.
+6. **"What it looks like" and "what it is" must be kept apart**: structural evidence (symmetry/shape/tone) supports "what it looks like";
+   "what it is" needs OCR/sampling/stronger evidence — without that, keep it as an inference.
+7. **hue families is a fingerprint of the scene type** (induced from 34 training images):
+   - cyan high (>60%) = water/fog/lake/morning mist scene (Eastern waterscapes, mist-shrouded ruins)
+   - green high (>40%) = forest/bamboo grove/grassland/moss
+   - orange or red high = figures in red cloaks or warm-coloured costume, firelight, sunset glow
+   - blue high (>70%) = night/cool-toned sci-fi scene
+   - achromatic high + rough high = ruins/rock/dark environment
+   - green + yellow both high = emerald energy band/glowing vegetation/floating fairyland
+   - symmetry high + central vertical structure = central subject (waterfall/tree/gate) in a centred composition
+8. **A multimodal model's colour descriptions are unreliable for "glow/energy"** (recurring during training): it systematically
+   calls measured cyan/blue/green cool glow (screen light, energy barrier, light shaft in fog) "pink/purple".
+   For glowing elements, always take the colour from the measured hue.
+9. **Signals for recognising people**: orange/red dominant + local small warm patches + symmetry = candidate figure in costume;
+   game characters often wear red/orange (red cloak, red hair, warm-toned combat suit), so when you detect a warm dominant tone,
+   actively zoom in to look for figures.
+10. **Brand/game names/title text**: a multimodal model guesses wrong (it said "Genshin Impact"/"Honkai Impact 3rd" when the image really showed
+    Arknights: Endfield), so OCR (PaddleOCR) must read it for real (game HUDs often carry the game name/parameters/watermark along the bottom).
 
-（新增经验会持续按以上分类沉淀进本 skill。）
+## Case notes (experience, brief)
 
-## vision_analyze 统一工具
+- Lake xianxia image: 97% symmetry was misjudged as a "man-made facade", when it was really a water reflection + stone pillars in the lake
+  + pink-purple mist → the lesson became insight 2.
+- Game glowing banner image: an OCR pass over 12 cells came back entirely empty and the multimodal model hallucinated "ask, answer, write",
+  while OCR (PaddleOCR) read "Dare to explore, question the heavens" in one pass → the lesson became insight 3.
+- Dark-background figure image: a figure in black merged into the background and was missed; at px_per_cell=3 the head, shoulders and torso
+  became clear → the lesson became insight 4.
 
-当需要一次性获取多种证据时，使用 `vision_analyze`：
-- 自动检测空白/简单图片（低信息量拦截）
-- 可选像素扫描（include_scan）
-- 可选 OCR 文字识别（include_ocr）
-- 可选 VLM 语义描述（include_vlm，需配置 SEE_BASE）
-- 所有证据以文本形式返回，供主模型推理
+(New experience keeps being filed into this skill under the categories above.)
 
-### 推荐的工作流程
+## The vision_analyze unified tool
 
-建议先用 `image_scan` 自己看，了解图片内容后再决定是否需要调用 VLM。简单图片用像素扫描就够了，复杂场景可以调用 VLM。
+When you need several kinds of evidence in one call, use `vision_analyze`:
+- automatically detects blank/simple images (low-information interception)
+- optional pixel scan (include_scan)
+- optional OCR text recognition (include_ocr)
+- optional VLM semantic description (include_vlm, requires SEE_BASE to be configured)
+- all evidence is returned as text for the main model to reason over
 
-### 多次提问
+### Recommended workflow
 
-对同一张图可以进行多次不同角度的提问，获取更全面的理解。
+It is best to look first with `image_scan` yourself and only decide whether to call the VLM once you know what the image contains. A pixel scan is enough for simple images; complex scenes can call the VLM.
 
-### 交叉验证
+### Asking several questions
 
-VLM 描述与像素/OCR 证据冲突时，以实测为准。
+You can ask several questions about the same image from different angles to get a fuller understanding.
 
-详细用法见 `skills/vision-analyze.md`。
+### Cross-validation
+
+When the VLM description conflicts with the pixel/OCR evidence, go with what was measured.
+
+See `skills/vision-analyze.md` for detailed usage.

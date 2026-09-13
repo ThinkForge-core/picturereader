@@ -15,6 +15,7 @@
 import { extname } from 'node:path';
 import { stat } from 'node:fs/promises';
 import { getRuntimeConfig } from './runtime.js';
+import { missingFileHint } from './workspace-paths.js';
 
 /** Hard cap on file bytes we are willing to read for a scan. */
 export const BYTE_CAP = 50 * 1024 * 1024;
@@ -204,7 +205,7 @@ export function createImageScanTool(ctx) {
       });
       const info = await ctx.fs.stat(target, exec.signal);
       if (!info) {
-        throw new Error(`image_scan: cannot read "${target.displayPath}": file not found`);
+        throw new Error(`image_scan: cannot read "${target.displayPath}": file not found${missingFileHint(target.displayPath)}`);
       }
       if (info.type !== 'file') {
         throw new Error(`image_scan: cannot read "${target.displayPath}": not a regular file`);
@@ -248,17 +249,23 @@ export function createImageScanTool(ctx) {
 
 /**
  * Build the model-facing `image_ocr` tool over one plugin context.
- * Recognizes text in an image (optionally within a region/focus) using the
- * Windows built-in OCR engine — fully local, no install.
+ * Recognizes text in an image (optionally within a region/focus) with
+ * PaddleOCR running in the installer-managed `paddle` venv — fully local, no
+ * external service.
  * @param ctx - the Cordis context providing `ctx.fs`.
  */
 export function createImageOcrTool(ctx) {
   return {
     name: 'image_ocr',
     description: [
-      'Recognize text in a local image. Four engines: engine="windows" uses the Windows built-in OCR (no install, good for printed/UI text); engine="macos" uses the macOS built-in Apple Vision OCR (no third-party install; one-time compile via scripts/setup-macos.mjs, fast, Chinese-friendly); engine="paddle" uses PaddleOCR via the local paddle_venv (much better for glowing, curved, stylized or game-rendered text and complex backgrounds, Chinese-friendly; ~2s model load per call); engine="rapid" uses RapidOCR via the local rapid_venv (bundled ONNX models, no network download, fast). Default follows the plugin setting ocr_engine ("windows" when unset).',
-      'Use it together with image_scan: when the pixel grid shows a dense, regular, high-contrast structure that looks like text (e.g. titles, labels, buttons, dialogs, glowing banners), call image_ocr on that region and read the actual characters. If the default engine returns nothing but text is expected, retry with another engine.',
-      'Parameters: file_path (required), region: [x0, y0, x1, y1] (0..1 fractions) or focus: [row0, col0, row1, col1] (grid coordinates) to restrict recognition to an area, language (optional BCP-47 tag like "zh-Hans" or "en-US", windows/macos engines), engine (default from settings: "windows", "macos", "paddle", "rapid").',
+      'Recognize text in a local image with PaddleOCR (local CPU, runs in the plugin\'s own Python environment; no network call and no external service). ' +
+        'It is markedly better than generic OCR on glowing, curved, stylized or game-rendered text, and it handles Latin, Chinese, Cyrillic and several other scripts.',
+      'The recognition model is chosen by language. The default model reads Chinese, English and Japanese; text in another script needs the matching language, ' +
+        'either through the plugin\'s "OCR default language" setting or the language argument of this call (for example language="ru" for Russian, "de" for German, "ar" for Arabic). ' +
+        'The model for a newly requested language is downloaded on first use, and a wrong language returns garbage rather than an error — if the recognized text looks like nonsense, check the language.',
+      'Use it together with image_scan: when the pixel grid shows a dense, regular, high-contrast structure that looks like text (e.g. titles, labels, buttons, dialogs, glowing banners), call image_ocr on that region and read the actual characters. Zoom in with region/focus when a full-image pass returns nothing but text is clearly visible.',
+      'Parameters: file_path (required), region: [x0, y0, x1, y1] (0..1 fractions) or focus: [row0, col0, row1, col1] (grid coordinates) to restrict recognition to an area, language (optional BCP-47 tag like "zh-Hans" or "en-US" — it selects the recognition model; unknown tags fall back to the multilingual default).',
+      'If the OCR environment is missing the tool says so and points at the plugin installer; it never silently returns an empty result.',
       'The result lists each recognized line with its pixel bounding box and confidence score.'
     ].join(' '),
     parameters: {
@@ -281,12 +288,8 @@ export function createImageOcrTool(ctx) {
         },
         language: {
           type: 'string',
-          description: 'Optional BCP-47 language tag (e.g. "zh-Hans", "en-US"); defaults to zh-Hans first on the macos engine, user languages on windows.'
-        },
-        engine: {
-          type: 'string',
-          enum: ['windows', 'paddle', 'rapid', 'macos'],
-          description: '"windows" = Windows built-in OCR; "macos" = macOS Apple Vision OCR (one-time build via scripts/setup-macos.mjs, fast, Chinese-friendly); "paddle" = PaddleOCR via local paddle_venv (better for glowing/curved/game text); "rapid" = RapidOCR via local rapid_venv (bundled ONNX models, fast). Default follows the plugin setting (windows).'
+          description: 'Optional BCP-47 language tag (e.g. "ru", "en-US", "zh-Hans", "ja", "de") selecting the PaddleOCR recognition model. '
+            + 'Falls back to the plugin\'s configured OCR language, then to the default model (Chinese / English / Japanese). Cyrillic text such as Russian returns garbage under the default model, so pass "ru" (or any Cyrillic language) for it.'
         }
       },
       required: ['file_path']
@@ -300,7 +303,8 @@ export function createImageOcrTool(ctx) {
           width: { type: 'integer' },
           height: { type: 'integer' },
           region: { type: 'string' },
-          engine: { type: 'string', enum: ['windows', 'paddle', 'rapid', 'macos'] },
+          engine: { type: 'string' },
+          lang: { type: 'string' },
           note: { type: 'string' },
           lines: {
             type: 'array',
@@ -349,14 +353,14 @@ export function createImageOcrTool(ctx) {
       if (args.language !== undefined && String(args.language).trim().length === 0) {
         throw new Error('image_ocr: language must be a non-empty BCP-47 tag');
       }
-      // Engine default follows the plugin setting (runtime snapshot of
-      // ocr_engine); explicit args.engine always wins. Falls back to
-      // 'windows' when unset — unchanged behavior for existing setups.
-      const configuredEngine = String(getRuntimeConfig().ocr?.engine ?? 'windows');
-      const engine = args.engine === undefined ? configuredEngine : String(args.engine);
-      if (engine !== 'windows' && engine !== 'paddle' && engine !== 'rapid' && engine !== 'macos') {
-        throw new Error("image_ocr: engine must be 'windows', 'macos', 'paddle' or 'rapid'");
-      }
+      // The recognition model is chosen by language: an explicit argument wins,
+      // otherwise the plugin's configured OCR language (settings card), and
+      // only then the built-in default. Without this fallback a deployment
+      // configured for, say, Russian would still be read with the default model.
+      const configuredLanguage = String(getRuntimeConfig().ocr?.language ?? '').trim();
+      const language = args.language === undefined
+        ? (configuredLanguage === '' ? undefined : configuredLanguage)
+        : String(args.language).trim();
 
       const cwd = exec.agent?.session?.header?.cwd;
       const target = await ctx.fs.resolve(filePath, {
@@ -365,7 +369,7 @@ export function createImageOcrTool(ctx) {
       });
       const info = await ctx.fs.stat(target, exec.signal);
       if (!info) {
-        throw new Error(`image_ocr: cannot read "${target.displayPath}": file not found`);
+        throw new Error(`image_ocr: cannot read "${target.displayPath}": file not found${missingFileHint(target.displayPath)}`);
       }
       if (info.type !== 'file') {
         throw new Error(`image_ocr: cannot read "${target.displayPath}": not a regular file`);
@@ -392,49 +396,27 @@ export function createImageOcrTool(ctx) {
         regionDisplay = 'full';
       }
 
-      // PaddleOCR / RapidOCR are optional engines: degrade gracefully to the
-      // platform-native engine (with a note) when they are missing or fail —
-      // never crash. On macOS the native engine is macos, elsewhere windows.
-      const OPTIONAL = {
-        paddle: { available: () => core.paddleAvailable(), install: 'node scripts/setup-ocr.mjs' },
-        rapid: { available: () => core.rapidAvailable(), install: 'node scripts/setup-rapid.mjs' }
-      };
-      const nativeEngine = process.platform === 'darwin' && (await core.macOcrAvailable()) ? 'macos' : 'windows';
-      let effectiveEngine = engine;
-      let note;
-      const opt = OPTIONAL[engine];
-      if (opt !== undefined && !(await opt.available())) {
-        effectiveEngine = nativeEngine;
-        note = `${engine[0].toUpperCase()}${engine.slice(1)}OCR is not installed (engine="${engine}" requested) — fell back to ${nativeEngine} OCR. To install it, run: ${opt.install} (see README).`;
+      // PaddleOCR is the only engine: when the environment is missing there is
+      // nothing to fall back to, so fail with an actionable message instead of
+      // a raw spawn error.
+      if (!(await core.paddleAvailable())) {
+        throw new Error(
+          `image_ocr: the PaddleOCR environment is missing (expected interpreter: ${core.paddlePython()}). ` +
+            `Install it with: python3 scripts/install.py`
+        );
       }
-      let result;
-      try {
-        result = await core.ocrImage(data, ext, {
-          region: regionArray,
-          language: args.language === undefined ? undefined : String(args.language).trim(),
-          engine: effectiveEngine
-        });
-      } catch (error) {
-        if (opt !== undefined && effectiveEngine === engine) {
-          effectiveEngine = nativeEngine;
-          note = `${engine[0].toUpperCase()}${engine.slice(1)}OCR failed (${error.message.slice(0, 140)}) — fell back to ${nativeEngine} OCR.`;
-          result = await core.ocrImage(data, ext, {
-            region: regionArray,
-            language: args.language === undefined ? undefined : String(args.language).trim(),
-            engine: nativeEngine
-          });
-        } else {
-          throw error;
-        }
-      }
+      const result = await core.ocrImage(data, ext, {
+        region: regionArray,
+        ...(language !== undefined ? { language } : {})
+      });
       ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec);
       return {
         path: target.displayPath,
         width: result.width,
         height: result.height,
         region: regionDisplay,
-        engine: effectiveEngine,
-        ...(note !== undefined ? { note } : {}),
+        engine: 'paddle',
+        lang: core.paddleLangFor(language),
         lines: result.lines
       };
     }
@@ -529,7 +511,7 @@ export function createImageSampleTool(ctx) {
       });
       const info = await ctx.fs.stat(target, exec.signal);
       if (!info) {
-        throw new Error(`image_sample: cannot read "${target.displayPath}": file not found`);
+        throw new Error(`image_sample: cannot read "${target.displayPath}": file not found${missingFileHint(target.displayPath)}`);
       }
       if (info.type !== 'file') {
         throw new Error(`image_sample: cannot read "${target.displayPath}": not a regular file`);

@@ -23,7 +23,7 @@ function makeFakeCtx({ statResult = { version: 'v1', type: 'file', size: 100 }, 
     fs: {
       async resolve(path, opts) {
         assert.ok(opts.signal !== undefined || opts.signal === null || opts.signal === undefined);
-        return { targetKey: `C:\\img\\${path}`, displayPath: `C:\\img\\${path}` };
+        return { targetKey: `/img/${path}`, displayPath: `/img/${path}` };
       },
       async stat(target) {
         return statResult;
@@ -37,7 +37,7 @@ function makeFakeCtx({ statResult = { version: 'v1', type: 'file', size: 100 }, 
   return { ctx, registered, emitted };
 }
 
-const EXEC = { signal: undefined, agent: { session: { header: { cwd: 'C:\\work' } } } };
+const EXEC = { signal: undefined, agent: { session: { header: { cwd: '/work' } } } };
 
 test('image_scan tool registers and executes end to end', async () => {
   const { buffer } = makeQuadrant(100, 100, 'png');
@@ -47,7 +47,7 @@ test('image_scan tool registers and executes end to end', async () => {
   assert.equal(registered.length, 0, 'registration happens via ctx.tools.register in apply()');
 
   const result = await tool.execute({ file_path: 'shot.png' }, EXEC);
-  assert.equal(result.path, 'C:\\img\\shot.png');
+  assert.equal(result.path, '/img/shot.png');
   assert.equal(result.width, 100);
   assert.equal(result.height, 100);
   assert.equal(result.gridWidth, 32);

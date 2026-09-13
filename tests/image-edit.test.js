@@ -30,7 +30,7 @@ function makeFakeCtx(entries, captured, opts = {}) {
       return {
         ok: true,
         action: 'resize',
-        out_path: 'C:\\out\\resized.png',
+        out_path: '/out/resized.png',
         width: 100,
         height: 80,
         bytes: 1234,
@@ -60,7 +60,7 @@ function makeFakeCtx(entries, captured, opts = {}) {
   return ctx;
 }
 
-const EXEC = { signal: undefined, agent: { session: { header: { cwd: 'C:\\work' }, id: 'sess-1' } } };
+const EXEC = { signal: undefined, agent: { session: { header: { cwd: '/work' }, id: 'sess-1' } } };
 
 // ---------------------------------------------------------------- tests
 
@@ -69,8 +69,8 @@ test('image_edit: unknown action throws', async () => {
   const ctx = makeFakeCtx({}, captured);
   const tool = createImageEditTool(ctx);
   await assert.rejects(
-    tool.execute({ action: 'nope', file_path: 'C:\\in.png' }, EXEC),
-    /未知 action/
+    tool.execute({ action: 'nope', file_path: '/in.png' }, EXEC),
+    /unknown action/
   );
   assert.equal(captured.length, 0, 'runner should not be called');
 });
@@ -81,17 +81,17 @@ test('image_edit: missing file_path throws', async () => {
   const tool = createImageEditTool(ctx);
   await assert.rejects(
     tool.execute({ action: 'resize', width: 100, height: 100 }, EXEC),
-    /需要 file_path/
+    /file_path is required/
   );
   assert.equal(captured.length, 0);
 });
 
 test('image_edit: resize builds correct request JSON (action/from/out + params)', async () => {
   const captured = [];
-  const ctx = makeFakeCtx({ 'C:\\in.png': { buffer: Buffer.from('PNGDATA'), type: 'file' } }, captured);
+  const ctx = makeFakeCtx({ '/in.png': { buffer: Buffer.from('PNGDATA'), type: 'file' } }, captured);
   const tool = createImageEditTool(ctx);
   const res = await tool.execute(
-    { action: 'resize', file_path: 'C:\\in.png', width: 200, height: 150, mode: 'fit' },
+    { action: 'resize', file_path: '/in.png', width: 200, height: 150, mode: 'fit' },
     EXEC
   );
   assert.equal(captured.length, 1);
@@ -102,7 +102,7 @@ test('image_edit: resize builds correct request JSON (action/from/out + params)'
   assert.equal(req.mode, 'fit');
   assert.ok(req.from.endsWith('in.png'), `main input materialized: ${req.from}`);
   assert.ok(req.out.endsWith('.png'), `default out has .png ext: ${req.out}`);
-  assert.ok(req.out.includes('picturereader-edit'), 'out under default edit dir');
+  assert.ok(req.out.includes('.picturereader'), 'out under the session workspace scratch dir');
   // result contract
   assert.equal(res.ok, true);
   assert.equal(res.action, 'resize');
@@ -113,13 +113,13 @@ test('image_edit: resize builds correct request JSON (action/from/out + params)'
 test('image_edit: composite passes from_extra (foreground image)', async () => {
   const captured = [];
   const entries = {
-    'C:\\bg.png': { buffer: Buffer.from('BG'), type: 'file' },
-    'C:\\fg.png': { buffer: Buffer.from('FG'), type: 'file' }
+    '/bg.png': { buffer: Buffer.from('BG'), type: 'file' },
+    '/fg.png': { buffer: Buffer.from('FG'), type: 'file' }
   };
   const ctx = makeFakeCtx(entries, captured);
   const tool = createImageEditTool(ctx);
   const res = await tool.execute(
-    { action: 'composite', file_path: 'C:\\bg.png', file_paths: ['C:\\fg.png'], position: 'bottom_right', alpha: 0.5 },
+    { action: 'composite', file_path: '/bg.png', file_paths: ['/fg.png'], position: 'bottom_right', alpha: 0.5 },
     EXEC
   );
   assert.equal(captured.length, 1);
@@ -135,22 +135,22 @@ test('image_edit: composite passes from_extra (foreground image)', async () => {
 
 test('image_edit: explicit out path honored, defaults resolved against cwd', async () => {
   const captured = [];
-  const ctx = makeFakeCtx({ 'C:\\in.png': { buffer: Buffer.from('X'), type: 'file' } }, captured);
+  const ctx = makeFakeCtx({ '/in.png': { buffer: Buffer.from('X'), type: 'file' } }, captured);
   const tool = createImageEditTool(ctx);
   await tool.execute(
-    { action: 'thumbnail', file_path: 'C:\\in.png', out: 'sub\\thumb.jpg', out_dir: 'C:\\outdir' },
+    { action: 'thumbnail', file_path: '/in.png', out: 'sub/thumb.jpg', out_dir: '/outdir' },
     EXEC
   );
   const { req } = captured[0];
   assert.equal(req.action, 'thumbnail');
-  // out_dir absolute, out relative -> resolved against cwd C:\work
+  // out_dir absolute, out relative -> resolved against cwd /work
 });
 
 test('image_edit: default timeout used', async () => {
   const captured = [];
-  const ctx = makeFakeCtx({ 'C:\\in.png': { buffer: Buffer.from('X'), type: 'file' } }, captured);
+  const ctx = makeFakeCtx({ '/in.png': { buffer: Buffer.from('X'), type: 'file' } }, captured);
   const tool = createImageEditTool(ctx);
-  await tool.execute({ action: 'flip', file_path: 'C:\\in.png', axis: 'horizontal' }, EXEC);
+  await tool.execute({ action: 'flip', file_path: '/in.png', axis: 'horizontal' }, EXEC);
   assert.equal(captured[0].timeoutMs, 120_000);
 });
 
@@ -175,7 +175,7 @@ test('image_edit: python error surfaces as tool error', async () => {
   const ctx = makeFakeCtx(
     { 'a.png': { buffer: Buffer.from('X'), type: 'file' } },
     captured,
-    { runner: () => { throw new Error('image_edit: 背景移除需要 rembg...'); } }
+    { runner: () => { throw new Error('image_edit: remove_background requires rembg...'); } }
   );
   const tool = createImageEditTool(ctx);
   await assert.rejects(

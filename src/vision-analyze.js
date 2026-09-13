@@ -24,6 +24,7 @@ import { isLowInformationImage } from './guard.js';
 import { ensureServer, stopServer, sendVisionRequest, defaultVlmConfig, isVlmConfigured, DEFAULT_BASE, DEFAULT_API_KEY } from './vlm.js';
 import { getRuntimeConfig } from './runtime.js';
 import { visionAnalyzeDefaults, isPrivacy, routePolicyText } from './routing.js';
+import { missingFileHint } from './workspace-paths.js';
 
 const CORE_URL = new URL('./core.js', import.meta.url).href;
 let coreCache = { url: null, mtime: -1, module: null };
@@ -94,10 +95,10 @@ export function createVisionAnalyzeTool(ctx) {
           type: 'boolean',
           description: 'Include OCR text evidence (default false; set true when text matters).'
         },
-        ocr_engine: {
+        ocr_language: {
           type: 'string',
-          enum: ['windows', 'paddle', 'rapid', 'macos'],
-          description: 'OCR engine: default follows the plugin setting (windows when unset); macos = macOS Apple Vision OCR (see image_ocr for details).'
+          description: 'Optional BCP-47 language tag selecting the PaddleOCR recognition model (e.g. "ru", "en", "zh-Hans", "ja", "de"). '
+            + 'Falls back to the plugin\'s configured OCR language, then to the default model (Chinese / English / Japanese). Cyrillic text needs its own language, e.g. "ru".'
         },
         include_vlm: {
           type: 'boolean',
@@ -156,7 +157,7 @@ export function createVisionAnalyzeTool(ctx) {
       });
       const info = await ctx.fs.stat(target, exec.signal);
       if (!info) {
-        throw new Error(`vision_analyze: cannot read "${target.displayPath}": file not found`);
+        throw new Error(`vision_analyze: cannot read "${target.displayPath}": file not found${missingFileHint(target.displayPath)}`);
       }
       if (info.type !== 'file') {
         throw new Error(`vision_analyze: cannot read "${target.displayPath}": not a regular file`);
@@ -197,8 +198,9 @@ export function createVisionAnalyzeTool(ctx) {
 
       if (lowInfo && !allowLowInfo) {
         const message =
-          '[vision_analyze] 低信息量拦截：图片空白或内容极少，为避免 VLM 幻觉，未调用 VLM。' +
-          '请检查截图是否空白/未渲染/窗口在屏幕外；如确需识别请设置 allow_low_info=true。';
+          '[vision_analyze] Low-information image: the picture is blank or nearly empty, so the VLM was not called ' +
+          'to avoid hallucination. Check whether the screenshot is blank, not rendered, or off-screen; ' +
+          'set allow_low_info=true if it genuinely needs recognition.';
         ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec);
         return { path: target.displayPath, lowInformation: true, message, combined: message };
       }
@@ -221,18 +223,29 @@ export function createVisionAnalyzeTool(ctx) {
       }
 
       if (includeOcr) {
-        // Engine default follows the plugin setting; explicit args.ocr_engine wins.
-        const engine = args.ocr_engine ?? getRuntimeConfig().ocr?.engine ?? 'windows';
-        const ocr = await core.ocrImage(buf, ext, { engine });
-        ocrText = core.renderOcr({
-          path: target.displayPath,
-          width: ocr.width,
-          height: ocr.height,
-          region: 'full',
-          engine: ocr.engine,
-          lines: ocr.lines
-        });
-        blocks.push(`[ocr]\n${ocrText}`);
+        const language = args.ocr_language === undefined
+          ? (getRuntimeConfig().ocr?.language ?? '')
+          : String(args.ocr_language).trim();
+        // OCR is one evidence block among several: a missing or failing OCR
+        // environment must not throw away the scan/VLM evidence already
+        // gathered, so report it as a block and carry on.
+        try {
+          const ocr = await core.ocrImage(buf, ext, {
+            ...(language !== '' ? { language } : {})
+          });
+          ocrText = core.renderOcr({
+            path: target.displayPath,
+            width: ocr.width,
+            height: ocr.height,
+            region: 'full',
+            lang: core.paddleLangFor(language === '' ? undefined : language),
+            lines: ocr.lines
+          });
+          blocks.push(`[ocr]\n${ocrText}`);
+        } catch (error) {
+          ocrText = `[ocr] unavailable: ${error.message}`;
+          blocks.push(ocrText);
+        }
       }
 
       if (shouldCallVlm) {
@@ -257,14 +270,14 @@ export function createVisionAnalyzeTool(ctx) {
         const hasBase = DEFAULT_BASE.length > 0;
         const hasKey = DEFAULT_API_KEY.length > 0;
         if (hasBase && !hasKey) {
-          blocks.push('[vlm] VLM 未就绪：已配置端点但缺少 API key。\n' +
-            '要使用免费的 GLM-4V-Flash 视觉模型，请：\n' +
-            '1. 访问 https://open.bigmodel.cn 注册智谱账号\n' +
-            '2. 获取 API Key\n' +
-            '3. 设置环境变量：GLM_API_KEY=你的key 或 SEE_API_KEY=你的key\n' +
-            '4. 重启 DSH 生效');
+          blocks.push('[vlm] The VLM is not ready: an endpoint is configured but the API key is missing.\n' +
+            'To use the free GLM-4V-Flash vision model:\n' +
+            '1. Register at https://open.bigmodel.cn\n' +
+            '2. Obtain an API key\n' +
+            '3. Set the environment variable GLM_API_KEY=<your key> or SEE_API_KEY=<your key>\n' +
+            '4. Restart DSH for it to take effect');
         } else {
-          blocks.push('[vlm] VLM 未配置（SEE_BASE 环境变量为空）');
+          blocks.push('[vlm] The VLM is not configured (SEE_BASE is empty)');
         }
       }
 

@@ -114,7 +114,7 @@ test('classify: achromatic gate keeps grays in the gray family', () => {
 test('renderImageScan produces a model-readable payload', () => {
   const rgba = makeChartRgba();
   const analysis = analyzeImage(rgba, 600, 400, { size: 24, mode: 'auto', region: undefined });
-  const value = { path: 'C:\\shots\\chart.png', width: 600, height: 400, region: 'full', ...analysis };
+  const value = { path: '/shots/chart.png', width: 600, height: 400, region: 'full', ...analysis };
   const text = renderImageScan(value);
   assert.match(text, /chart\.png \(600x400 -> \d+x\d+ cells/);
   assert.match(text, /colors by area:/);

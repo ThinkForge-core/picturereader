@@ -47,7 +47,7 @@ function makeFakeCtx(entries, opts = {}) {
   return ctx;
 }
 
-const EXEC = { signal: undefined, agent: { session: { header: { cwd: 'C:\\work' }, id: 'sess-1' } } };
+const EXEC = { signal: undefined, agent: { session: { header: { cwd: '/work' }, id: 'sess-1' } } };
 
 /** A tiny structurally-valid single-page PDF that fitz can open+render. */
 const MIN_PDF = Buffer.from(
@@ -87,20 +87,20 @@ test('document_to_image: rejects unsupported extension with a clear message', as
   const tool = createDocumentToImageTool(ctx);
   await assert.rejects(
     () => tool.execute({ file_path: 'd.txt' }, EXEC),
-    /不支持的文件类型 "\.txt"/
+    /unsupported document type "\.txt"/
   );
   await assert.rejects(
     () => tool.execute({ file_path: 'd.png' }, EXEC),
-    /不支持的文件类型 "\.png"/
+    /unsupported document type "\.png"/
   );
 });
 
 test('document_to_image: requires an input (file_path or file_paths)', async () => {
   const ctx = makeFakeCtx({});
   const tool = createDocumentToImageTool(ctx);
-  await assert.rejects(() => tool.execute({}, EXEC), /需要一个输入文件/);
-  await assert.rejects(() => tool.execute({ file_path: '' }, EXEC), /需要一个输入文件/);
-  await assert.rejects(() => tool.execute({ file_paths: [] }, EXEC), /需要一个输入文件/);
+  await assert.rejects(() => tool.execute({}, EXEC), /an input document is required/);
+  await assert.rejects(() => tool.execute({ file_path: '' }, EXEC), /an input document is required/);
+  await assert.rejects(() => tool.execute({ file_paths: [] }, EXEC), /an input document is required/);
 });
 
 test('document_to_image: file_path and file_paths are mutually exclusive', async () => {
@@ -108,7 +108,7 @@ test('document_to_image: file_path and file_paths are mutually exclusive', async
   const tool = createDocumentToImageTool(ctx);
   await assert.rejects(
     () => tool.execute({ file_path: 'a.pdf', file_paths: ['b.pdf'] }, EXEC),
-    /不要同时传/
+    /not both/
   );
 });
 
@@ -125,7 +125,7 @@ test('document_to_image: dpi and max_pages bounds are validated', async () => {
 test('document_to_image: missing file reports a clear error', async () => {
   const ctx = makeFakeCtx({}); // no entry for nope.pdf
   const tool = createDocumentToImageTool(ctx);
-  await assert.rejects(() => tool.execute({ file_path: 'nope.pdf' }, EXEC), /找不到文件/);
+  await assert.rejects(() => tool.execute({ file_path: 'nope.pdf' }, EXEC), /file not found/);
 });
 
 // ------------------------------------------ success path via injected runner
@@ -152,7 +152,8 @@ test('document_to_image: single PDF maps runner output into the result structure
   assert.equal(captured.maxPages, 2);
   assert.equal(captured.prefix, 'page_1');
   assert.ok(captured.inputPath.includes('.pdf'), 'input is materialized to a real .pdf path');
-  assert.ok(captured.outDir.includes('picturereader-doc'), 'default out_dir lives under picturereader-doc');
+  assert.ok(captured.outDir.startsWith(join('/work', '.picturereader')),
+    'default out_dir lives in the session workspace, where the agent can see it');
 
   assert.equal(result.documents.length, 1);
   const d = result.documents[0];
@@ -165,14 +166,14 @@ test('document_to_image: single PDF maps runner output into the result structure
   assert.equal(d.pages[0].width, 417);
   assert.equal(d.pages[0].bytes, 2440);
   assert.equal(typeof d.pages[0].path, 'string');
-  assert.ok(result.out_dir.includes('picturereader-doc'));
-  assert.ok(result.summary.includes('2 页'));
+  assert.ok(result.out_dir.startsWith(join('/work', '.picturereader')));
+  assert.ok(result.summary.includes('rendered 2 PNG page(s)'));
   assert.ok(result.note.includes('image_scan'));
 });
 
 test('document_to_image: explicit out_dir is honored and used for every page path', async () => {
   // path style follows the host platform (join semantics differ per OS)
-  const OUT_DIR = process.platform === 'win32' ? 'D:\\out\\docs' : '/tmp/out/docs';
+  const OUT_DIR = '/tmp/out/docs';
   let usedOut = null;
   const runner = (inputPath, outDir, prefix) => {
     usedOut = outDir;
@@ -199,7 +200,7 @@ test('document_to_image: batch file_paths converts each document and names prefi
   assert.equal(result.documents[0].input, 'a.pdf');
   assert.equal(result.documents[1].input, 'b.docx');
   assert.deepEqual(calls, ['page_1', 'page_2'], 'each doc gets its own prefix so no filename collision');
-  assert.ok(result.summary.includes('2 个文档'));
+  assert.ok(result.summary.includes('Converted 2 document(s)'));
 });
 
 test('document_to_image: source temp file is cleaned up after conversion', async () => {
@@ -231,10 +232,10 @@ test('document_to_image: source temp file is cleaned up after conversion', async
 });
 
 test('document_to_image: runner error message is surfaced (e.g. missing LibreOffice)', async () => {
-  const runner = () => { throw new Error('document_to_image: 转换失败: LibreOffice(soffice) 未找到。请安装 LibreOffice'); };
+  const runner = () => { throw new Error('document_to_image: conversion failed: LibreOffice (soffice) not found. Please install LibreOffice.'); };
   const ctx = makeFakeCtx({ 'a.pdf': { buffer: MIN_PDF } }, { runner });
   const tool = createDocumentToImageTool(ctx);
-  await assert.rejects(() => tool.execute({ file_path: 'a.pdf' }, EXEC), /soffice.*未找到/);
+  await assert.rejects(() => tool.execute({ file_path: 'a.pdf' }, EXEC), /soffice.*not found/);
 });
 
 test('document_to_image: render returns text blocks for the model', async () => {
@@ -242,8 +243,8 @@ test('document_to_image: render returns text blocks for the model', async () => 
   const tool = createDocumentToImageTool(ctx);
   const blocks = tool.output.render({}, {
     documents: [{ input: 'a.pdf', page_count: 3, rendered: 1, truncated: true, pages: [{ index: 1, path: 'P', width: 8, height: 8, bytes: 9 }] }],
-    out_dir: 'D:\\out',
-    summary: '转换完成',
+    out_dir: '/tmp/out',
+    summary: 'Converted',
     note: 'note-x'
   });
   assert.equal(blocks.length, 1);
@@ -255,8 +256,8 @@ test('document_to_image: render returns text blocks for the model', async () => 
 
 // ------------------------------------------------- integration (real render)
 
-const DOC_VENV = 'C:\\Users\\Administrator\\doc_venv\\Scripts\\python.exe';
-const SOFFICE = 'C:\\Program Files\\LibreOffice\\program\\soffice.exe';
+const DOC_VENV = '/Users/Administrator/doc_venv/Scripts/python.exe';
+const SOFFICE = '/Program Files\\LibreOffice\\program\\soffice.exe';
 const envHas = existsSync(DOC_VENV) && existsSync(SOFFICE);
 
 test('document_to_image [integration]: renders a real minimal PDF to PNG', { skip: !envHas }, async () => {

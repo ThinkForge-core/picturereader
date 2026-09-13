@@ -9,3 +9,11 @@ docs/
 .DS_Store
 __pycache__/
 *.pyc
+# npm cache used when the default ~/.npm is not writable
+.npmcache-local/
+
+# local install sandbox used by acceptance runs
+.pr-test/
+
+# throwaway environments created by ad-hoc install runs
+.pr-*/

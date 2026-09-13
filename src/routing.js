@@ -22,15 +22,14 @@ export const MODES = Object.freeze({
   strict: 'strict',
 });
 
-/** 三模式中文标签。 */
+/**
+ * Human-readable mode labels.
+ *
+ * There used to be a Chinese variant as well; the project is English-only now,
+ * so this single table is the only source of mode names (settings card,
+ * bridge hints, tool output).
+ */
 export const MODE_LABELS = Object.freeze({
-  privacy: '隐私模式',
-  smart: '智能模式',
-  strict: '严谨模式',
-});
-
-/** 三模式英文标签。 */
-export const MODE_LABELS_EN = Object.freeze({
   privacy: 'Privacy',
   smart: 'Smart',
   strict: 'Strict',
@@ -94,28 +93,33 @@ export function routePolicyText(mode, opts = {}) {
   const vlmConfigured = opts.vlmConfigured === undefined ? true : !!opts.vlmConfigured;
   if (m === MODES.privacy) {
     return (
-      '【当前模式：隐私模式】绝不调用任何外部视觉 API，也不访问网络看模型。' +
-      '对每张图只能使用本地工具：image_scan（看布局/颜色/结构）、image_ocr（读文字）、' +
-      'image_sample（细看材质纹理）。请用这些本地工具自行理解图片内容。'
+      '[Mode: Privacy] Never call any external vision API and never reach the network for model help. ' +
+      'For every image you may only use local tools: image_scan (layout / colors / structure), ' +
+      'image_ocr (read text), image_sample (close-up material and texture). ' +
+      'Understand the image yourself with these local tools.'
     );
   }
   if (m === MODES.smart) {
     return (
-      '【当前模式：智能模式】先用 image_scan 快速看一眼图片（布局/颜色/是否含文字/是否照片）。' +
-      '然后自行判断：' +
-      '（1）若图片以文字为主 → 用 image_ocr 读文字即可，不必调 VLM；' +
-      '（2）若图片是普通图表/界面/简单内容 → 用 image_scan + image_sample 自己看就能说清，不必调 VLM；' +
-      '（3）仅当图片内容复杂、需要语义理解（如照片、抽象画面）' +
-      (vlmConfigured ? '且值得时，才调用 vision_analyze(include_vlm=true) 走外部 VLM' : '）时才尝试 VLM，但当前未配置外部 VLM，尽量用本地工具') +
-      '。目标是减少调用轮数与耗时，能本地就别外呼。'
+      '[Mode: Smart] Start with image_scan for a quick look at the image (layout / colors / whether it contains text / whether it is a photo). ' +
+      'Then decide for yourself: ' +
+      '(1) if the image is mostly text, image_ocr is enough — no need to call a VLM; ' +
+      '(2) if it is an ordinary chart, UI or simple content, image_scan + image_sample are enough — no need to call a VLM; ' +
+      '(3) only when the content is genuinely complex and needs semantic understanding (a photo, an abstract scene) ' +
+      (vlmConfigured
+        ? 'and it is worth the cost, call vision_analyze(include_vlm=true) to reach the external VLM'
+        : 'would a VLM help, but no external VLM is configured here, so stay local') +
+      '. The goal is fewer round trips and less wall time: prefer local work whenever it suffices.'
     );
   }
   return (
-    '【当前模式：严谨模式】自行选择路线并追求可靠：先用 image_scan 了解整体，' +
-    '必要时用 image_ocr 读文字、image_sample 细看细节。对关键判断采用交叉验证：' +
-    '把 image_scan / image_ocr ( / 外部 VLM) 多种证据相互对照，不轻易下结论。' +
-    (vlmConfigured ? '需要语义理解且值得时可用 vision_analyze(include_vlm=true) 走外部 VLM。' : '当前未配置外部 VLM，优先用本地工具自行理解。') +
-    '可以仔细查看细节，但要避免幻觉、给出有依据的描述。'
+    '[Mode: Strict] Choose the route yourself and optimise for reliability: start with image_scan for the overall picture, ' +
+    'then use image_ocr for text and image_sample for close detail when needed. Cross-check the key conclusions: ' +
+    'compare the image_scan / image_ocr ( / external VLM) evidence against each other instead of trusting a single source. ' +
+    (vlmConfigured
+      ? 'When semantic understanding is needed and worth it, use vision_analyze(include_vlm=true). '
+      : 'No external VLM is configured, so prefer local tools. ') +
+    'Look at details closely, but avoid hallucination and give a grounded description.'
   );
 }
 
@@ -126,5 +130,5 @@ export function routePolicyText(mode, opts = {}) {
  */
 export function routeModeTag(mode) {
   const m = normalizeMode(mode);
-  return `[模式:${MODE_LABELS[m]}]`;
+  return `[mode:${MODE_LABELS[m]}]`;
 }
