@@ -264,7 +264,8 @@ python3 scripts/install.py --json
 | `--from <path>` | Install the plugin from a local directory (default: this checkout). |
 | `--profiles web` | Comma-separated DSH profile(s) to install into. |
 | `--dsh <path>` | Path to the `dsh` executable when it is not on `PATH`. |
-| `--skip-ocr` | Do not create the PaddleOCR environment (and do not warm it up). |
+| `--skip-ocr` | Do not create the OCR environment (and do not warm it up). |
+| `--engine <ocr\|paddle>` | Which OCR environment to install. `ocr` (default) is RapidOCR on ONNX Runtime and is the only one that installs on aarch64; `paddle` is the legacy PaddleOCR environment and needs Python 3.13 or older. |
 | `--with-optional` | Also install the optional extras: `rembg` (`remove_background`) and `rawpy` (`raw_convert`). |
 | `--venv-prefix <dir>` | Directory for the Python environments (default `~/.dsh/picturereader/venvs`). |
 | `--index-url <url>` | Python package index to use for pip. |
@@ -286,9 +287,10 @@ python3 scripts/install.py --json
 |---|---|---|
 | Plugin registration | the selected DSH profile | The plugin row installed into the profile. |
 | `media` environment | `~/.dsh/picturereader/venvs/media` | PyMuPDF + Pillow + OpenCV-headless + piexif. Used by **both** `document_to_image` and `image_edit`. |
-| `paddle` environment | `~/.dsh/picturereader/venvs/paddle` | `paddlepaddle` + `paddleocr`. Used by `image_ocr`. Needs Python 3.13 or older. |
+| `ocr` environment | `~/.dsh/picturereader/venvs/ocr` | RapidOCR + ONNX Runtime. Used by `image_ocr`; tiled, so long screenshots keep full resolution. |
+| `paddle` environment | `~/.dsh/picturereader/venvs/paddle` | `paddlepaddle` + `paddleocr`, only with `--engine paddle`. Legacy: still detected at runtime so an older installation keeps working, but it has no aarch64 wheel. Needs Python 3.13 or older. |
 | State file | `~/.dsh/picturereader/env.json` | Where the plugin reads the interpreter paths, cache locations and helper binaries the installer discovered. |
-| PaddleOCR cache | `~/.paddlex-cache` | Recognition models, downloaded and warmed up on first use or during installation. |
+| Recognition models | inside the `ocr` environment | Downloaded and warmed up during installation, so the first `image_ocr` call is instant. |
 
 The state file is what makes the installation reproducible: DSH does not need any environment plumbing to find the environments the installer created. Environment variables, when set, override the state file.
 

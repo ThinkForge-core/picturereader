@@ -36,6 +36,7 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { mediaPython, installHint } from './paths.js';
 import { defaultOutputDir, missingFileHint } from './workspace-paths.js';
+import { availableEditActions, termuxEditNote, TERMUX_UNAVAILABLE_EDIT_ACTIONS } from './platform-profile.js';
 
 /** Absolute path to scripts/image-edit.py (this module lives in src/). */
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'image-edit.py');
@@ -52,7 +53,7 @@ const ACTION_TIMEOUT_MS = {
   perspective: 120_000,
 };
 
-const ACTIONS = [
+const ALL_ACTIONS = [
   // P0
   'resize', 'rotate', 'flip', 'convert', 'adjust', 'blur', 'sharpen',
   'composite', 'watermark', 'thumbnail',
@@ -61,6 +62,13 @@ const ACTIONS = [
   // P2
   'exif_read', 'exif_write', 'raw_convert', 'upscale', 'colorspace', 'morphology',
 ];
+
+/**
+ * Actions this host can run. Under Termux the three that need extras Termux
+ * cannot install are withheld (see platform-profile.js) rather than offered and
+ * then failing at runtime.
+ */
+const ACTIONS = availableEditActions(ALL_ACTIONS);
 
 function throwIfAborted(signal) {
   if (signal?.aborted) throw new Error('image_edit: cancelled');
@@ -158,6 +166,7 @@ export function createImageEditTool(ctx) {
       'colorspace (P2): target (rgb|hsv|lab|gray|cmyk).',
       'morphology (P2): op (erode|dilate|open|close|gradient), size (kernel, default 3).',
       'Requires the plugin Python environment (Pillow + OpenCV). If it is missing the tool returns a setup hint pointing at `python3 scripts/install.py`.'
+      + (termuxEditNote() ? ' ' + termuxEditNote() : '')
     ].join(' '),
     parameters: {
       type: 'object',
@@ -222,6 +231,12 @@ export function createImageEditTool(ctx) {
       // ---- action validation ----
       const action = typeof args.action === 'string' ? args.action.trim() : '';
       if (!ACTION_SET.has(action)) {
+        if (action in TERMUX_UNAVAILABLE_EDIT_ACTIONS) {
+          throw new Error(
+            `image_edit: the "${action}" action is not available here — ${TERMUX_UNAVAILABLE_EDIT_ACTIONS[action]}. `
+              + `Install the extras in the plugin environment to enable it (supported here: ${ACTIONS.join(', ')}).`
+          );
+        }
         throw new Error(`image_edit: unknown action "${action}" (supported: ${ACTIONS.join(', ')}).`);
       }
 
@@ -314,6 +329,7 @@ export function createImageEditTool(ctx) {
 }
 
 const ACTION_SET = new Set(ACTIONS);
+export { ACTIONS, ALL_ACTIONS };
 
 // Registration factory, consistent with the other tools (called from index.js).
 export function registerImageEdit(ctx) {
