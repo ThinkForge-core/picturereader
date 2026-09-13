@@ -1,11 +1,11 @@
 {
     "name": "picturereader",
-    "version": "3.3.3",
+    "version": "3.4.0",
     "repository": {
         "type": "git",
         "url": "https://github.com/jing-hy/picturereader.git"
     },
-    "description": "Unified image understanding plugin for DeepSeek Harness (DSH), for Linux. Visual twin adapter for native thumbnails + auto-analysis on any text-only model (incl. pi-ai providers); privacy/smart/strict routing; local tools (scan / PaddleOCR / crop / palette / compare / batch); document-to-image (pdf/word/excel/ppt); local photo editing (image_edit: resize/rotate/filter/composite/watermark/background-remove/upscale etc, pure CPU); optional external VLM bridge. Installation and removal are handled by scripts/install.py and scripts/uninstall.py.",
+    "description": "Unified image understanding plugin for DeepSeek Harness (DSH), for Linux and Termux/Android. Visual twin adapter for native thumbnails + auto-analysis on any text-only model (incl. pi-ai providers); privacy/smart/strict routing; local tools (scan / RapidOCR with tiling / crop / palette / compare / batch); document-to-image (pdf/word/excel/ppt); local photo editing (image_edit: resize/rotate/filter/composite/watermark/background-remove/upscale etc, pure CPU); optional external VLM bridge. Installation and removal are handled by scripts/install.py and scripts/uninstall.py.",
     "type": "module",
     "main": "src/index.js",
     "exports": {
@@ -38,7 +38,12 @@
         "pixels",
         "ascii",
         "ocr",
-        "paddleocr",
+        "rapidocr",
+        "onnxruntime",
+        "long-screenshot",
+        "termux",
+        "android",
+        "proot",
         "hue",
         "multimodal",
         "vlm",
