@@ -332,9 +332,11 @@ window.__ModuleLoader__.load({
         var alive = true;
         var sync = function () { if (alive) setSnapshot(scope.getSnapshot()); };
         var un = typeof scope.subscribe === "function" ? scope.subscribe(sync) : null;
-        // 注意：卸载时只退订、不 dispose scope——scope 属于插件 fiber 生命周期
-        // （apply 时 bind），组件卸载销毁它会令"关闭设置页再重开"后写失效
-        // （0.1.2 scope 有 dispose 后触发该回归）。
+        // NOTE: on unmount we only unsubscribe — we never dispose the scope.
+        // The scope belongs to the plugin fiber lifetime (bound during apply);
+        // disposing it from a component teardown makes every write silently
+        // fail after the settings page is closed and reopened (a 0.1.2
+        // regression that resurfaces as soon as a scope has dispose()).
         return function () { alive = false; if (un) un(); };
       }, [scope]);
       react.useEffect(function () {
@@ -414,8 +416,10 @@ window.__ModuleLoader__.load({
           if (str.trim() === "") { ops.push({ op: "unset", key: f.key }); return; }
           ops.push({ op: "set", key: f.key, value: str });
         });
-        // vision_models：由 VisionBridgePicker 的草稿（draft["vision_models"]）驱动，
-        // 点保存才提交——空列表走 unset（回落 schema 默认 []），非空走 set。
+        // vision_models is driven by VisionBridgePicker's draft
+        // (draft["vision_models"]) and only committed on Save: an empty list
+        // goes through unset (falling back to the schema default []), a
+        // non-empty one through set.
         if (draft["vision_models"] !== void 0) {
           var vm = draft["vision_models"];
           if (Array.isArray(vm) && vm.length === 0) {
