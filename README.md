@@ -298,6 +298,64 @@ The state file is what makes the installation reproducible: DSH does not need an
 
 Both scripts narrate every step as it happens: the exact command being run, what is being downloaded together with its expected size, the streamed output of `pip` and `pnpm`, and the timing of each step. You can always tell what the installer is doing and how long each stage took.
 
+## Termux / Android
+
+Termux is Android, so it uses Bionic libc and PyPI's manylinux wheels do not
+apply: `opencv-python-headless`, `pyclipper` and `shapely` have no Termux build
+and would have to be compiled from source. `paddlepaddle` is worse — it
+publishes **no** `manylinux*aarch64` wheel from 3.3.0 onwards at all.
+
+The plugin therefore keeps its Python environments inside a `proot-distro`
+Debian rootfs, where the glibc is manylinux-compatible and every dependency
+resolves to a prebuilt aarch64 wheel. Nothing is ever compiled.
+
+```sh
+# In Termux, from the plugin checkout:
+bash scripts/termux/setup.sh            # install or repair
+bash scripts/termux/setup.sh --verify   # check without changing anything
+```
+
+The script installs `proot-distro`, creates a Debian rootfs, and builds two
+environments inside it:
+
+| Environment | Location (inside the rootfs) | Contents |
+|---|---|---|
+| `media` | `/opt/picturereader/media` | PyMuPDF + Pillow + OpenCV-headless + piexif. |
+| `ocr` | `/opt/picturereader/ocr` | RapidOCR + ONNX Runtime, plus the recognition models. |
+
+Each gets a small wrapper in `$PREFIX/bin` (`picturereader-media-python`,
+`picturereader-ocr-python`) that enters the rootfs and runs the interpreter.
+`proot-distro` binds the Termux home, `$PREFIX` and `/sdcard` at their original
+paths, so script and image paths mean the same thing on both sides and no path
+translation is needed.
+
+The script then writes both interpreters into the state file, and prints the
+`DSH_MEDIA_PYTHON` / `DSH_OCR_PYTHON` variables you can export instead. Prefer
+the variables on a device: re-running `scripts/install.py` rewrites the state
+file and would drop those entries.
+
+Deliberately **not** installed:
+
+* **LibreOffice** (~1.5 GB). It only converts Office documents to PDF; PDFs are
+  rendered by PyMuPDF directly, so `document_to_image` works on PDFs out of the
+  box. Install it inside the rootfs if you actually receive `.docx`/`.xlsx`:
+  `proot-distro login debian -- apt-get install -y libreoffice-core`
+* **`rembg` / `rawpy`** (the optional extras). Under Termux `image_edit` hides
+  the `remove_background`, `raw_convert` and `upscale` actions instead of
+  advertising them and failing at runtime; installing the extras inside the
+  rootfs brings them back.
+
+Long screenshots are the case this setup is built around. Every OCR engine of
+this family downscales an image whose longest side exceeds its limit
+(PaddleOCR 960 px, RapidOCR 2000 px), which silently turns a stitched
+screenshot into unreadable noise. `scripts/ocr.py` tiles the image instead, so
+no downscaling ever happens, and reads each tile with two recognition models
+(Chinese/English and East Slavic), keeping the more confident reading per line
+— Russian, English and Chinese work in one pass without declaring a language.
+
+On a 1080×11040 screenshot mixing the three scripts, that is the difference
+between **98/100 lines correct** (tiled, ~6 s) and **0/100** (single pass).
+
 ## Uninstallation
 
 ```sh
