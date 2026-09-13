@@ -1185,6 +1185,7 @@ export function runRapidOcrFile(inputPath, {
   tile = 'auto',
   timeoutMs = OCR_DEFAULT_TIMEOUT_MS,
   signal,
+  threads,
   python = ocrPython()
 } = {}) {
   const args = [OCR_SCRIPT_PATH, '--input', String(inputPath), '--tile', String(tile)];
@@ -1193,6 +1194,11 @@ export function runRapidOcrFile(inputPath, {
   }
   if (Array.isArray(region)) args.push('--region', region.join(','));
   if (Array.isArray(focus)) args.push('--focus', focus.join(','));
+  // ONNX Runtime otherwise sizes its thread pool to the core count. On a phone
+  // that keeps every core busy for the whole run (heat, battery, and competing
+  // with the rest of the system), so the cap is configurable.
+  const threadCap = threads ?? Number.parseInt(process.env.DSH_OCR_THREADS ?? '', 10);
+  if (Number.isInteger(threadCap) && threadCap > 0) args.push('--threads', String(threadCap));
 
   return new Promise((resolve, reject) => {
     const child = spawn(python, args, {

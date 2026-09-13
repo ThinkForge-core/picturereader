@@ -203,8 +203,10 @@ test('rapid runner: focus is passed through instead of a region', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'picturereader-ocr-test-'));
   const { stub, record } = makeStub(dir);
   const previous = process.env.DSH_OCR_PYTHON;
+  const previousThreads = process.env.DSH_OCR_THREADS;
   process.env.DSH_OCR_PYTHON = stub;
   process.env.STUB_RECORD = record;
+  process.env.DSH_OCR_THREADS = '2';
   try {
     const core = await import(`../src/core.js?t=${Date.now()}-focus`);
     await core.runRapidOcrFile('/tmp/x.png', { focus: [1, 2, 3, 4] });
@@ -213,9 +215,38 @@ test('rapid runner: focus is passed through instead of a region', async () => {
     assert.ok(!argv.includes('--region'));
     assert.equal(argv[argv.indexOf('--tile') + 1], 'auto', 'tile defaults to auto');
     assert.ok(!argv.includes('--language'), 'language is omitted when not requested');
+    // ONNX Runtime would otherwise saturate every core on a phone.
+    assert.equal(argv[argv.indexOf('--threads') + 1], '2', 'DSH_OCR_THREADS caps the thread pool');
   } finally {
     if (previous === undefined) delete process.env.DSH_OCR_PYTHON;
     else process.env.DSH_OCR_PYTHON = previous;
+    if (previousThreads === undefined) delete process.env.DSH_OCR_THREADS;
+    else process.env.DSH_OCR_THREADS = previousThreads;
+    delete process.env.STUB_RECORD;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rapid runner: an unset or invalid thread cap is not passed on', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'picturereader-ocr-test-'));
+  const { stub, record } = makeStub(dir);
+  const previous = process.env.DSH_OCR_PYTHON;
+  const previousThreads = process.env.DSH_OCR_THREADS;
+  process.env.DSH_OCR_PYTHON = stub;
+  process.env.STUB_RECORD = record;
+  try {
+    const core = await import(`../src/core.js?t=${Date.now()}-threads`);
+    for (const bad of ['', 'nonsense', '0', '-3']) {
+      process.env.DSH_OCR_THREADS = bad;
+      await core.runRapidOcrFile('/tmp/x.png', {});
+      const argv = readFileSync(record, 'utf8').split('\n');
+      assert.ok(!argv.includes('--threads'), `"${bad}" must not become a --threads argument`);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.DSH_OCR_PYTHON;
+    else process.env.DSH_OCR_PYTHON = previous;
+    if (previousThreads === undefined) delete process.env.DSH_OCR_THREADS;
+    else process.env.DSH_OCR_THREADS = previousThreads;
     delete process.env.STUB_RECORD;
     rmSync(dir, { recursive: true, force: true });
   }
