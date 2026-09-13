@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -68,15 +69,37 @@ VENV_SPECS = {
         "min_python": (3, 10),
         "max_python": None,
     },
+    "ocr": {
+        "label": "OCR (RapidOCR + ONNX Runtime)",
+        "requirements": "ocr.txt",
+        "roles": ["ocr"],
+        # onnxruntime publishes manylinux_2_28_aarch64 wheels for cp311..cp314,
+        # so this environment installs on every architecture this plugin
+        # targets — including aarch64, where PaddleOCR cannot be installed.
+        "min_python": (3, 9),
+        "max_python": None,
+        # rapidocr is installed in a second pass with --no-deps: its
+        # `opencv_python` requirement would otherwise pull the GUI OpenCV build
+        # next to the headless one that ocr.txt pins, and the GUI build needs
+        # libGL.so.1, which a proot rootfs does not have.
+        "no_deps": ["rapidocr==3.9.2"],
+    },
     "paddle": {
-        "label": "OCR (PaddleOCR + paddlepaddle)",
+        "label": "OCR (legacy PaddleOCR)",
         "requirements": "paddle.txt",
         "roles": ["ocr"],
         # paddlepaddle publishes no cp314 wheels yet: cap the interpreter.
+        # NOTE: also no linux-aarch64 wheel from 3.3.0 on, and paddle.txt pins a
+        # newer version than the last ARM release (3.2.2) — which is exactly why
+        # this environment is legacy-only and `ocr` is the default.
         "min_python": (3, 9),
         "max_python": (3, 13),
+        "legacy": True,
     },
 }
+
+#: Which environment `--engine` selects by default.
+DEFAULT_ENGINE_ROLE = "ocr"
 
 OPTIONAL_REQUIREMENTS = "optional.txt"
 
@@ -216,7 +239,7 @@ class Preflight:
                 self.notes.append(message)
         return ok
 
-    def run(self, profiles, engine_needed=True):
+    def run(self, profiles, engine_needed=True, engine_role=DEFAULT_ENGINE_ROLE):
         c = self.console
         c.step("Preflight checks", "everything below runs before a single file is written")
         c.item("platform", platform_summary())
@@ -244,17 +267,29 @@ class Preflight:
 
         # OCR environment interpreter ----------------------------------------
         if engine_needed:
-            pick = choose_interpreter(found, VENV_SPECS["paddle"])
+            role = engine_role
+            spec = VENV_SPECS[role]
+            pick = choose_interpreter(found, spec)
             if pick is None:
+                maximum = spec.get("max_python")
+                if maximum is None:
+                    reason = "need Python %s or newer" % version_string(spec["min_python"])
+                else:
+                    reason = "%s needs Python <= %s (paddlepaddle has no newer wheels)" % (
+                        spec["label"],
+                        version_string(maximum),
+                    )
+                self.check("python for %s venv" % role, False, reason, fatal=True)
+            else:
+                self.check("python for %s venv" % role, True, version_string(pick[1]))
+            if role == "paddle" and platform.machine() in ("aarch64", "arm64"):
                 self.check(
-                    "python for paddle venv",
+                    "paddlepaddle has an aarch64 wheel",
                     False,
-                    "PaddleOCR needs Python <= %s (paddlepaddle has no newer wheels)"
-                    % version_string(VENV_SPECS["paddle"]["max_python"]),
+                    "the pinned paddlepaddle has no linux-aarch64 wheel (the last ARM release is 3.2.2); "
+                    "use --engine ocr (RapidOCR) instead",
                     fatal=True,
                 )
-            else:
-                self.check("python for paddle venv", True, version_string(pick[1]))
 
         # Node / dsh / pnpm ---------------------------------------------------
         self.node = find_executable(("node",))
@@ -319,7 +354,7 @@ class Preflight:
         # Disk space -----------------------------------------------------------
         self.free_bytes = shutil.disk_usage(str(home if home.exists() else Path.home())).free
         self.check("free disk space", True, human_size(self.free_bytes))
-        estimated = estimate_install_bytes(engine_needed)
+        estimated = estimate_install_bytes(engine_needed, engine_role)
         if self.free_bytes < estimated:
             self.check(
                 "disk space is sufficient",
@@ -418,12 +453,19 @@ def choose_interpreter(interpreters, spec):
     return None
 
 
-def estimate_install_bytes(engine_needed):
+def selected_venv_roles(cfg):
+    """The venv roles this run will install, in order."""
+    roles = ["media"]
+    if cfg["engine_needed"]:
+        roles.append(cfg.get("engine_role", DEFAULT_ENGINE_ROLE))
+    return roles
+
+
+def estimate_install_bytes(engine_needed, engine_role=DEFAULT_ENGINE_ROLE):
     """Rough disk estimate so the plan can warn before a big download."""
     total = 0
-    for role, spec in VENV_SPECS.items():
-        if role == "paddle" and not engine_needed:
-            continue
+    for role in selected_venv_roles({"engine_needed": engine_needed, "engine_role": engine_role}):
+        spec = VENV_SPECS[role]
         _, lines = load_requirements(spec["requirements"])
         if lines:
             for line in lines:
@@ -459,9 +501,8 @@ def build_plan(cfg):
                 else "materialize manually (pnpm unavailable)",
             }
         )
-    for role, spec in VENV_SPECS.items():
-        if role == "paddle" and not cfg["engine_needed"]:
-            continue
+    for role in selected_venv_roles(cfg):
+        spec = VENV_SPECS[role]
         venv_dir = Path(cfg["prefix"]) / role
         python = venv_python_path(venv_dir)
         if python.exists():
@@ -719,6 +760,19 @@ def ensure_venv(role, spec, cfg, console):
     console.run(cmd, title="pip install (%d package(s))" % len(lines))
     result["packages"] = lines
 
+    # Packages that must not resolve their own dependencies (see no_deps above).
+    no_deps = spec.get("no_deps") or []
+    if no_deps:
+        console.step("Installing %r without dependencies" % role, "so the pinned headless builds are kept")
+        console.run(
+            [str(python), "-m", "pip", "install", "--progress-bar", "on", "--disable-pip-version-check", "--no-input"]
+            + (["--index-url", cfg["index_url"]] if cfg["index_url"] else [])
+            + ["--no-deps"]
+            + list(no_deps),
+            title="pip install --no-deps %s" % ", ".join(no_deps),
+        )
+        result["packages"] = lines + list(no_deps)
+
     if role == "media" and cfg["with_optional"]:
         _, optional = load_requirements(OPTIONAL_REQUIREMENTS)
         if optional:
@@ -758,6 +812,13 @@ def verify_environment(role, python, console):
             "'Pillow': PIL.__version__, 'opencv': cv2.__version__, 'piexif': piexif.VERSION}))"
         )
         env = None
+    elif role == "ocr":
+        script = (
+            "import json, cv2, onnxruntime, rapidocr;"
+            "print(json.dumps({'rapidocr': getattr(rapidocr, '__version__', 'ok'),"
+            "'onnxruntime': onnxruntime.__version__, 'opencv': cv2.__version__}))"
+        )
+        env = None
     else:
         # Importing paddleocr makes PaddleX create its cache directory, so the
         # cache location must already be set correctly here.
@@ -778,8 +839,40 @@ def verify_environment(role, python, console):
     return True
 
 
-def warm_up_ocr(python, console):
+def warm_up_ocr(role, python, console):
     """Run one real recognition so the model cache is populated up front."""
+    if role == "ocr":
+        return _warm_up_rapid(python, console)
+    return _warm_up_paddle(python, console)
+
+
+def _warm_up_rapid(python, console):
+    """Load both recognition models once, so the first tool call is instant."""
+    console.step(
+        "Warming up RapidOCR",
+        "the first run downloads the detection and recognition models next to the package",
+    )
+    code, tail = console.run(
+        [str(python), str(HERE / "ocr.py"), "--probe"],
+        title="loading the detection and recognition models",
+        check=False,
+    )
+    if code != 0:
+        console.warn(
+            "the warm-up run failed; the environment itself is installed, so retry after a network hiccup "
+            "or run the same command by hand:"
+        )
+        console.out("  %s %s --probe" % (python, HERE / "ocr.py"))
+        for line in tail[-6:]:
+            console.out("  " + line)
+        return False
+    summary = tail[-1].strip() if tail else ""
+    console.ok("model cache ready%s" % ((": " + summary[:200]) if summary else ""))
+    return True
+
+
+def _warm_up_paddle(python, console):
+    """Legacy PaddleOCR warm-up."""
     if not WARMUP_IMAGE.exists():
         console.warn("warm-up image is missing (%s); the first image_ocr call will download the models" % WARMUP_IMAGE)
         return True
@@ -967,9 +1060,15 @@ def selftest():
     check("package_version absent", package_version("paddleocr") is None)
     media_file, media_lines = load_requirements("media.txt")
     check("media requirements load", bool(media_lines), str(media_file))
+    ocr_file, ocr_lines = load_requirements("ocr.txt")
+    check("ocr requirements load", bool(ocr_lines), str(ocr_file))
     paddle_file, paddle_lines = load_requirements("paddle.txt")
     check("paddle requirements load", bool(paddle_lines), str(paddle_file))
-    check("no unpinned specifier", all("==" in line for line in (media_lines or []) + (paddle_lines or [])))
+    check("no unpinned specifier", all("==" in line for line in (media_lines or []) + (ocr_lines or []) + (paddle_lines or [])))
+    check("the default engine is the aarch64-installable one", DEFAULT_ENGINE_ROLE == "ocr")
+    check("the default engine specification exists", DEFAULT_ENGINE_ROLE in VENV_SPECS)
+    check("the default engine has no interpreter cap", VENV_SPECS[DEFAULT_ENGINE_ROLE]["max_python"] is None)
+    check("the default engine defers a no-deps pass", bool(VENV_SPECS[DEFAULT_ENGINE_ROLE].get("no_deps")))
 
     # interpreter selection
     fake = [("/usr/bin/python3.14", (3, 14, 7)), ("/usr/bin/python3.13", (3, 13, 9)), ("/usr/bin/python3.12", (3, 12, 1))]
@@ -1003,6 +1102,10 @@ def selftest():
     plan = build_plan(cfg)
     check("plan mentions the profile", any("web" in row["component"] for row in plan))
     check("plan mentions both venvs", len([r for r in plan if "venv" in r["component"]]) == 2)
+    check(
+        "the plan names the default engine",
+        any(("venv '%s'" % DEFAULT_ENGINE_ROLE) in r["component"] for r in plan),
+    )
     check("plan mentions the state file", any("state file" in row["component"] for row in plan))
 
     print("")
@@ -1027,7 +1130,13 @@ def parse_args(argv):
     parser.add_argument("--from", dest="source", default=str(REPO_ROOT), help="plugin checkout to install (default: this repository)")
     parser.add_argument("--profiles", default="web", help="comma-separated DSH profiles to install into (default: web)")
     parser.add_argument("--dsh", dest="dsh", default=None, help="path to the dsh executable when it is not on PATH")
-    parser.add_argument("--skip-ocr", action="store_true", help="do not create the PaddleOCR environment")
+    parser.add_argument("--skip-ocr", action="store_true", help="do not create the OCR environment")
+    parser.add_argument(
+        "--engine",
+        choices=sorted(VENV_SPECS),
+        default=DEFAULT_ENGINE_ROLE,
+        help="which OCR environment to install (default: %s)" % DEFAULT_ENGINE_ROLE,
+    )
     parser.add_argument("--with-optional", action="store_true", help="also install rembg (background removal) and rawpy (RAW)")
     parser.add_argument("--venv-prefix", dest="prefix", default=None, help="where to create the Python environments")
     parser.add_argument("--index-url", dest="index_url", default=None, help="Python package index to use (default: PyPI)")
@@ -1084,6 +1193,7 @@ def main(argv=None):
         "source": source,
         "prefix": Path(args.prefix).resolve() if args.prefix else default_venv_prefix(),
         "engine_needed": not args.skip_ocr,
+        "engine_role": args.engine,
         "with_optional": args.with_optional,
         "install_skill": args.install_skill,
         "index_url": args.index_url,
@@ -1101,7 +1211,7 @@ def main(argv=None):
     if args.dsh and not Path(args.dsh).exists():
         console.err("--dsh points at %s, which does not exist" % args.dsh)
         return 1
-    if not pre.run(profiles, engine_needed=cfg["engine_needed"]):
+    if not pre.run(profiles, engine_needed=cfg["engine_needed"], engine_role=cfg["engine_role"]):
         console.raw("")
         console.raw(console.red("  preflight failed — nothing was changed"))
         console.raw("  resolve the problems above and run the installer again")
@@ -1154,11 +1264,12 @@ def main(argv=None):
         venv_records["media"] = media
 
         if cfg["engine_needed"]:
-            paddle = ensure_venv("paddle", VENV_SPECS["paddle"], cfg, console)
-            if not verify_environment("paddle", paddle["python"], console):
+            role = cfg["engine_role"]
+            engine = ensure_venv(role, VENV_SPECS[role], cfg, console)
+            if not verify_environment(role, engine["python"], console):
                 plan_failed = True
-            venv_records["paddle"] = paddle
-            if not warm_up_ocr(paddle["python"], console):
+            venv_records[role] = engine
+            if not warm_up_ocr(role, engine["python"], console):
                 console.warn("the OCR environment works but its model cache is not warm yet")
 
         if cfg["install_skill"]:

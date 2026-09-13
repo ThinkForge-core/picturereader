@@ -25,8 +25,15 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 
-/** Name of the venv roles the installer can create. */
-export const VENV_ROLES = ['media', 'paddle'];
+/**
+ * Name of the venv roles the installer can create.
+ *
+ * `ocr` is the RapidOCR (ONNX Runtime) environment and the default engine on
+ * every platform, including aarch64/Termux where PaddleOCR cannot be installed
+ * at all. `paddle` is the legacy environment: it still works and is still
+ * detected, so an existing installation keeps working until it is recreated.
+ */
+export const VENV_ROLES = ['media', 'ocr', 'paddle'];
 
 /** Cache of the parsed state file, keyed by absolute path + mtime. */
 let stateCache = { path: null, mtimeMs: -1, value: null };
@@ -111,7 +118,18 @@ export function mediaPython() {
 }
 
 /**
- * Interpreter of the PaddleOCR venv.
+ * Interpreter of the OCR (RapidOCR) venv — the default OCR engine.
+ * @returns {string} absolute path.
+ */
+export function ocrPython() {
+  return venvPython('ocr', 'DSH_OCR_PYTHON');
+}
+
+/**
+ * Interpreter of the legacy PaddleOCR venv.
+ *
+ * Kept so that an installation created before the OCR environment existed
+ * keeps working; new installs use {@link ocrPython} instead.
  * @returns {string} absolute path.
  */
 export function paddlePython() {

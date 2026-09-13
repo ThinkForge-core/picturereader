@@ -43,12 +43,17 @@ const PLATFORM_PATTERNS = [
   { name: 'macOS engine', re: /\bmacos\b/i },
   { name: 'darwin', re: /\bdarwin\b/i },
   { name: 'xcrun/swiftc', re: /\bxcrun\b|\bswiftc\b/ },
-  { name: 'rapidocr', re: /rapidocr/i },
   { name: 'WSL', re: /\bWSL\b/ },
   { name: 'legacy setup scripts', re: /setup-(ocr|rapid|macos|doc-venv|image-venv)\.mjs/ },
   { name: 'win32 platform check', re: /process\.platform\s*===\s*['"]win32['"]/ },
   { name: 'drive-letter path', re: /[A-Za-z]:\\\\/ }
 ];
+
+// NOTE: `rapidocr` used to be banned here, because the RapidOCR engine was one
+// of the platform-specific forks this refactor removed. It is now the default
+// engine on *every* platform — including aarch64/Termux, where PaddleOCR cannot
+// be installed at all — so it is no longer a platform marker. What must stay
+// banned is naming a platform in order to *branch* on it.
 
 /**
  * APIs that were deleted. These only matter where they would actually run or be

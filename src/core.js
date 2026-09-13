@@ -16,8 +16,11 @@
  *   achromatic gate so dark grays never misclassify as brown
  * - pipeline: region crop, aspect-fit downscale, per-cell average + saturated
  *   "accent" color (keeps thin colored lines visible), luminance/color grids
- * - OCR: PaddleOCR through the installer-managed `paddle` venv (local, CPU,
- *   no external service — the engines are downloaded once into the model cache)
+ * - OCR: RapidOCR (ONNX Runtime) through the installer-managed `ocr` venv —
+ *   local, CPU, no external service, tiled so long screenshots keep full
+ *   resolution, and dual-model so Russian/English/Chinese need no declaration.
+ *   The legacy PaddleOCR `paddle` venv is still used when it is the only one
+ *   present.
  * @module picturereader/core
  */
 
@@ -25,13 +28,17 @@ import { PNG } from 'pngjs';
 import * as jpeg from 'jpeg-js';
 import { GifReader } from 'omggif';
 import { spawn } from 'node:child_process';
-import { writeFile, rm, stat } from 'node:fs/promises';
+import { writeFile, rm, stat, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
-import { paddlePython, paddleCacheHome, installHint } from './paths.js';
+import { ocrPython, paddlePython, paddleCacheHome, installHint } from './paths.js';
 
-export { paddlePython, paddleCacheHome };
+export { ocrPython, paddlePython, paddleCacheHome };
+
+/** Absolute path to scripts/ocr.py (this module lives in src/). */
+const OCR_SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'ocr.py');
 
 // ---------------------------------------------------------------------------
 // palette
@@ -1088,6 +1095,201 @@ export async function paddleAvailable(python = paddlePython()) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// RapidOCR (ONNX Runtime) — the default engine
+//
+// Runs scripts/ocr.py, which tiles long images so no downscaling happens and
+// reads every detected line with several recognition models (so Russian,
+// English and Chinese work in one pass). Unlike the PaddleOCR path below, this
+// never decodes the image in JavaScript, so the 24-megapixel decode limit that
+// guards image_scan does not apply to OCR.
+// ---------------------------------------------------------------------------
+
+/** Absolute path of the bundled OCR runner (`scripts/ocr.py`). */
+export function ocrScriptPath() {
+  return OCR_SCRIPT_PATH;
+}
+
+/** Marker `scripts/ocr.py` prints on stdout right before its payload. */
+export const OCR_PAYLOAD_MARKER = '@@PICTUREREADER-OCR@@';
+
+/**
+ * Extract the base64 payload from an OCR child's stdout.
+ *
+ * The payload is delimited by {@link OCR_PAYLOAD_MARKER}, because something in
+ * front of it may legitimately write to stdout: under Termux the OCR runner is
+ * reached through `proot-distro login`, which prints a banner. A line such as
+ * `root` is valid base64 alphabet and would silently corrupt the payload if we
+ * simply kept every base64-looking line. Without a marker (the legacy
+ * PaddleOCR script) we fall back to that filter.
+ *
+ * @param stdout - the child's accumulated stdout.
+ * @returns the base64 payload, or an empty string when there is none.
+ */
+export function extractOcrPayload(stdout) {
+  const marker = stdout.lastIndexOf(OCR_PAYLOAD_MARKER);
+  const tail = marker === -1 ? stdout : stdout.slice(marker + OCR_PAYLOAD_MARKER.length);
+  return tail.split('\n').map((l) => l.trim()).filter((l) => l && /^[A-Za-z0-9+/=]+$/.test(l)).join('');
+}
+
+/** Recognition models `auto` uses when the caller does not name a language. */
+export const RAPID_AUTO_LANGS = ['ch', 'eslav'];
+
+/** Default OCR timeout. Tiling a long screenshot is slower than one pass. */
+export const OCR_DEFAULT_TIMEOUT_MS = 180_000;
+
+/** True when a Python interpreter exists at `python`. */
+async function interpreterExists(python) {
+  try {
+    await stat(python);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Choose the local OCR engine.
+ *
+ * RapidOCR wins when its environment is present; the legacy PaddleOCR
+ * environment is used when it is the only one installed. A missing engine is
+ * reported as `null` so callers can produce an actionable hint.
+ *
+ * @returns `{ engine: 'rapid'|'paddle'|null, python: string }`.
+ */
+export async function ocrEngine() {
+  if (await interpreterExists(ocrPython())) return { engine: 'rapid', python: ocrPython() };
+  if (await interpreterExists(paddlePython())) return { engine: 'paddle', python: paddlePython() };
+  return { engine: null, python: ocrPython() };
+}
+
+/** Whether any local OCR engine is installed. */
+export async function ocrAvailable() {
+  return (await ocrEngine()).engine !== null;
+}
+
+/**
+ * Run `scripts/ocr.py` on an image file.
+ *
+ * The file stays on disk: the Python side reads it, tiles it and decodes it,
+ * so JavaScript never holds a full-resolution bitmap.
+ *
+ * @param inputPath - absolute path to the image.
+ * @param options - `{ language, region, focus, tile, timeoutMs, signal, python }`.
+ * @returns `{ engine, langs, width, height, tiles, lines, notes }`.
+ */
+export function runRapidOcrFile(inputPath, {
+  language,
+  region,
+  focus,
+  tile = 'auto',
+  timeoutMs = OCR_DEFAULT_TIMEOUT_MS,
+  signal,
+  python = ocrPython()
+} = {}) {
+  const args = [OCR_SCRIPT_PATH, '--input', String(inputPath), '--tile', String(tile)];
+  if (language !== undefined && language !== null && String(language).trim() !== '') {
+    args.push('--language', String(language).trim());
+  }
+  if (Array.isArray(region)) args.push('--region', region.join(','));
+  if (Array.isArray(focus)) args.push('--focus', focus.join(','));
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(python, args, {
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      ...(signal !== undefined ? { signal } : {})
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`image_ocr: OCR timed out after ${Math.round(timeoutMs / 1000)}s — retry with a region, or raise the timeout`));
+    }, timeoutMs);
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      if (error.code === 'ENOENT') {
+        reject(new Error(`image_ocr: OCR interpreter not found at ${python} — ${installHint()}`));
+        return;
+      }
+      reject(new Error(`image_ocr: cannot start the OCR runner: ${error.message}`));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        const tail = stderr.trim().split('\n').filter((l) => l.trim() !== '').slice(-3).join(' | ') || stderr.trim().slice(-200);
+        reject(new Error(`image_ocr: OCR failed (exit ${code}): ${tail}`));
+        return;
+      }
+      // Model loading prints diagnostics; the payload sits behind a marker.
+      const b64 = extractOcrPayload(stdout);
+      if (!b64) {
+        reject(new Error('image_ocr: OCR produced no output (tail: ' + stdout.trim().split('\n').slice(-3).join(' | ').slice(0, 200) + ')'));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+        resolve({
+          engine: 'rapid',
+          langs: Array.isArray(parsed.langs) ? parsed.langs : RAPID_AUTO_LANGS,
+          width: parsed.width ?? 0,
+          height: parsed.height ?? 0,
+          tiles: parsed.tiles ?? 1,
+          notes: Array.isArray(parsed.notes) ? parsed.notes : [],
+          lines: parsed.lines ?? []
+        });
+      } catch (error) {
+        reject(new Error(`image_ocr: cannot parse the OCR result: ${error.message}`));
+      }
+    });
+  });
+}
+
+/**
+ * OCR an image file with whichever engine is installed.
+ *
+ * The RapidOCR path passes the file straight to Python. The legacy PaddleOCR
+ * path has to decode in JavaScript (that engine takes an image, not a path),
+ * so its 24-megapixel decode limit still applies — one more reason the
+ * installer now prefers RapidOCR.
+ *
+ * @param inputPath - absolute path to the image.
+ * @param options - `{ language, region, focus, tile, timeoutMs, signal }`.
+ * @returns `{ engine, lang, width, height, lines, notes }`.
+ */
+export async function ocrFile(inputPath, options = {}) {
+  const { engine, python } = await ocrEngine();
+  if (engine === 'rapid') {
+    const result = await runRapidOcrFile(inputPath, { ...options, python });
+    return { ...result, lang: result.langs.join('+') };
+  }
+  if (engine === 'paddle') {
+    const ext = extname(String(inputPath)).toLowerCase();
+    const buffer = await readFile(inputPath);
+    const image = decodeImage(buffer, ext);
+    if (image.width * image.height > 24_000_000) {
+      throw new Error(
+        `image_ocr: ${image.width}x${image.height} exceeds the ${24_000_000}-pixel decode limit of the legacy PaddleOCR engine — ` +
+          'install the RapidOCR environment (scripts/install.py) to read images this large'
+      );
+    }
+    const result = await ocrImage(buffer, ext, {
+      ...(options.region !== undefined ? { region: options.region } : {}),
+      ...(options.language !== undefined ? { language: options.language } : {})
+    });
+    return {
+      engine: 'paddle',
+      lang: paddleLangFor(options.language),
+      width: result.width,
+      height: result.height,
+      lines: result.lines,
+      notes: []
+    };
+  }
+  throw new Error(`image_ocr: no local OCR engine is installed (expected interpreter: ${ocrPython()}) — ${installHint()}`);
+}
+
 /**
  * Run PaddleOCR on a PNG file through the installer-managed `paddle` venv.
  *
@@ -1151,10 +1353,9 @@ export function runPaddleOcr(pngPath, { language } = {}) {
         reject(new Error(`image_ocr: PaddleOCR failed (exit ${code}): ${tail}`));
         return;
       }
-      // The first run downloads recognition models, and the download source can
-      // print stray debug lines such as `<Response [404]>` on stdout, which
-      // would corrupt the base64 payload. Keep only well-formed base64 lines.
-      const b64 = stdout.split('\n').map((l) => l.trim()).filter((l) => l && /^[A-Za-z0-9+/=]+$/.test(l)).join('');
+      // Stray stdout (download progress, a `proot-distro` login banner) must not
+      // corrupt the payload — see extractOcrPayload.
+      const b64 = extractOcrPayload(stdout);
       if (!b64) {
         reject(new Error('image_ocr: PaddleOCR produced no base64 output (tail: ' + stdout.trim().split('\n').slice(-3).join(' | ').slice(0, 200) + ')'));
         return;
@@ -1204,7 +1405,13 @@ export async function ocrImage(buffer, ext, { region, language } = {}) {
  */
 export function renderOcr(value) {
   const lines = [];
-  lines.push(`ocr: ${value.path} (${value.width}x${value.height}, region=${value.region}, engine=paddle, lang=${value.lang ?? PADDLE_DEFAULT_LANG})`);
+  const engine = value.engine ?? 'paddle';
+  const lang = value.lang ?? (engine === 'rapid' ? RAPID_AUTO_LANGS.join('+') : PADDLE_DEFAULT_LANG);
+  const tiles = value.tiles !== undefined && value.tiles > 1 ? `, tiles=${value.tiles}` : '';
+  lines.push(`ocr: ${value.path} (${value.width}x${value.height}, region=${value.region}, engine=${engine}, lang=${lang}${tiles})`);
+  for (const note of value.notes ?? []) {
+    lines.push(`note: ${note}`);
+  }
   if (value.note !== undefined) {
     lines.push(`note: ${value.note}`);
   }

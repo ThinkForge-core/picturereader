@@ -12,8 +12,10 @@
  * @module picturereader/tool
  */
 
-import { extname } from 'node:path';
+import { extname, join } from 'node:path';
 import { stat } from 'node:fs/promises';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { getRuntimeConfig } from './runtime.js';
 import { missingFileHint } from './workspace-paths.js';
 
@@ -258,13 +260,12 @@ export function createImageOcrTool(ctx) {
   return {
     name: 'image_ocr',
     description: [
-      'Recognize text in a local image with PaddleOCR (local CPU, runs in the plugin\'s own Python environment; no network call and no external service). ' +
-        'It is markedly better than generic OCR on glowing, curved, stylized or game-rendered text, and it handles Latin, Chinese, Cyrillic and several other scripts.',
-      'The recognition model is chosen by language. The default model reads Chinese, English and Japanese; text in another script needs the matching language, ' +
-        'either through the plugin\'s "OCR default language" setting or the language argument of this call (for example language="ru" for Russian, "de" for German, "ar" for Arabic). ' +
-        'The model for a newly requested language is downloaded on first use, and a wrong language returns garbage rather than an error — if the recognized text looks like nonsense, check the language.',
+      'Recognize text in a local image with RapidOCR (local CPU, ONNX Runtime, runs in the plugin\'s own Python environment; no network call and no external service). ' +
+        'It is markedly better than generic OCR on glowing, curved, stylized or game-rendered text, and it handles Latin, Cyrillic, Chinese and several other scripts.',
+      'Long images are handled properly. Every engine of this family downscales an image whose longest side exceeds its limit, which turns a stitched screenshot into unreadable noise; this tool instead tiles such an image and keeps full resolution, so long screenshots and long PDF pages are read accurately. Tiling is automatic and costs a little extra time.',
+      'By default each line is read with two recognition models (Chinese/English and East Slavic/Cyrillic) and the more confident reading wins, so Russian, English and Chinese can be mixed in one image without declaring a language. Pass language to force a single model, e.g. "ru", "en-US", "zh-Hant", "ja", "de". A wrong forced language returns confident nonsense rather than an error, so leave it unset when unsure.',
       'Use it together with image_scan: when the pixel grid shows a dense, regular, high-contrast structure that looks like text (e.g. titles, labels, buttons, dialogs, glowing banners), call image_ocr on that region and read the actual characters. Zoom in with region/focus when a full-image pass returns nothing but text is clearly visible.',
-      'Parameters: file_path (required), region: [x0, y0, x1, y1] (0..1 fractions) or focus: [row0, col0, row1, col1] (grid coordinates) to restrict recognition to an area, language (optional BCP-47 tag like "zh-Hans" or "en-US" — it selects the recognition model; unknown tags fall back to the multilingual default).',
+      'Parameters: file_path (required), region: [x0, y0, x1, y1] (0..1 fractions) or focus: [row0, col0, row1, col1] (grid coordinates) to restrict recognition to an area, language (optional BCP-47 tag), tile: "auto" (default), "on" or "off".',
       'If the OCR environment is missing the tool says so and points at the plugin installer; it never silently returns an empty result.',
       'The result lists each recognized line with its pixel bounding box and confidence score.'
     ].join(' '),
@@ -288,8 +289,13 @@ export function createImageOcrTool(ctx) {
         },
         language: {
           type: 'string',
-          description: 'Optional BCP-47 language tag (e.g. "ru", "en-US", "zh-Hans", "ja", "de") selecting the PaddleOCR recognition model. '
-            + 'Falls back to the plugin\'s configured OCR language, then to the default model (Chinese / English / Japanese). Cyrillic text such as Russian returns garbage under the default model, so pass "ru" (or any Cyrillic language) for it.'
+          description: 'Optional BCP-47 language tag (e.g. "ru", "en-US", "zh-Hans", "ja", "de") or a RapidOCR language key (e.g. "eslav", "cyrillic", "ch") selecting the recognition model. '
+            + 'When omitted, each line is read with both the Chinese/English and the East Slavic model and the more confident result is kept, which covers Russian, English and Chinese at once.'
+        },
+        tile: {
+          type: 'string',
+          enum: ['auto', 'on', 'off'],
+          description: 'Tiling mode (default "auto"). "auto" tiles only an image that is larger than the engine limit, which is what makes long screenshots readable; "on" forces tiling; "off" sends the whole image in one pass (legacy behaviour, inaccurate on long images).'
         }
       },
       required: ['file_path']
@@ -305,7 +311,9 @@ export function createImageOcrTool(ctx) {
           region: { type: 'string' },
           engine: { type: 'string' },
           lang: { type: 'string' },
+          tiles: { type: 'integer' },
           note: { type: 'string' },
+          notes: { type: 'array', items: { type: 'string' } },
           lines: {
             type: 'array',
             items: {
@@ -374,20 +382,21 @@ export function createImageOcrTool(ctx) {
       if (info.type !== 'file') {
         throw new Error(`image_ocr: cannot read "${target.displayPath}": not a regular file`);
       }
-      const data = await ctx.fs.readBytes(target, exec.signal, BYTE_CAP);
 
-      const image = core.decodeImage(data, ext);
-      if (image.width * image.height > MAX_PIXELS) {
-        throw new Error(
-          `image_ocr: ${image.width}x${image.height} exceeds the ${MAX_PIXELS}-pixel decode limit — downscale or crop the file first`
-        );
+      const tileMode = args.tile === undefined ? 'auto' : String(args.tile).trim().toLowerCase();
+      if (tileMode !== 'auto' && tileMode !== 'on' && tileMode !== 'off') {
+        throw new Error('image_ocr: tile must be "auto", "on" or "off"');
       }
 
+      // `focus` is resolved against the real image grid by the Python side, so
+      // this path never needs the decoded dimensions.
       let regionArray;
       let regionDisplay;
       if (args.focus !== undefined) {
-        const fullGridHeight = Math.max(1, Math.round(32 * (image.height / image.width)));
-        regionArray = core.resolveFocus(args.focus, 32, fullGridHeight);
+        if (!Array.isArray(args.focus) || args.focus.length !== 4
+            || args.focus.some((v) => !Number.isInteger(Number(v)) || Number(v) < 0)) {
+          throw new Error('image_ocr: focus must be [row0, col0, row1, col1] grid coordinates (inclusive)');
+        }
         regionDisplay = `focus [${args.focus.map(String).join(',')}]`;
       } else if (args.region !== undefined) {
         regionArray = core.normalizeRegion(args.region);
@@ -396,27 +405,34 @@ export function createImageOcrTool(ctx) {
         regionDisplay = 'full';
       }
 
-      // PaddleOCR is the only engine: when the environment is missing there is
-      // nothing to fall back to, so fail with an actionable message instead of
-      // a raw spawn error.
-      if (!(await core.paddleAvailable())) {
-        throw new Error(
-          `image_ocr: the PaddleOCR environment is missing (expected interpreter: ${core.paddlePython()}). ` +
-            `Install it with: python3 scripts/install.py`
-        );
+      // The bytes go to a temp file and the OCR runner reads them itself. That
+      // is what removes the 24-megapixel pure-JS decode limit from OCR: a long
+      // stitched screenshot is tiled by the Python side at full resolution.
+      const data = await ctx.fs.readBytes(target, exec.signal, BYTE_CAP);
+      const tmpDir = mkdtempSync(join(tmpdir(), 'picturereader-ocr-'));
+      const localPath = join(tmpDir, `input${ext}`);
+      let result;
+      try {
+        writeFileSync(localPath, data);
+        result = await core.ocrFile(localPath, {
+          ...(language !== undefined ? { language } : {}),
+          ...(regionArray !== undefined ? { region: regionArray } : {}),
+          ...(args.focus !== undefined ? { focus: args.focus } : {}),
+          tile: tileMode
+        });
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
       }
-      const result = await core.ocrImage(data, ext, {
-        region: regionArray,
-        ...(language !== undefined ? { language } : {})
-      });
       ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec);
       return {
         path: target.displayPath,
         width: result.width,
         height: result.height,
         region: regionDisplay,
-        engine: 'paddle',
-        lang: core.paddleLangFor(language),
+        engine: result.engine,
+        lang: result.lang,
+        tiles: result.tiles,
+        notes: result.notes,
         lines: result.lines
       };
     }

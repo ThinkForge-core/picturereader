@@ -193,6 +193,8 @@ test('sofficePath: the state file is used when the environment is silent', (t) =
 });
 
 test('VENV_ROLES / installHint describe the installer contract', () => {
-  assert.deepEqual([...VENV_ROLES], ['media', 'paddle']);
+  // `ocr` (RapidOCR) is the default engine; `paddle` is the legacy environment
+  // that is still detected so pre-existing installations keep working.
+  assert.deepEqual([...VENV_ROLES], ['media', 'ocr', 'paddle']);
   assert.match(installHint(), /scripts\/install\.py/);
 });
