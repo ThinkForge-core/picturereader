@@ -438,20 +438,65 @@ fi
 # `dsh plugin ... add`. On a device that call is the ONLY part of `install.py`
 # that can work (it never builds a venv), so it is repeated here instead of
 # telling the operator to run an installer that would fail on Termux.
+#
+# The plugin is registered from a packed tarball and never from the checkout.
+# `dsh plugin add <directory>` installs a pnpm `link:`, i.e. a symlink, and Node
+# then resolves the plugin's imports from the checkout's real path. The bare
+# `import '@deepseek-ai/schemastery'` in src/index.js is a peer that lives in the
+# profile's tree, not in the checkout, so it never resolves and the host dies at
+# boot with ERR_MODULE_NOT_FOUND. Nothing before the boot catches that: `inspect`
+# follows the market's vendored-library policy and only reads declarations, and
+# `verify` — the one check that really imports the installed copy — is not run by
+# anyone between `plugin add` and a restart. A tarball is unpacked into the
+# profile's own store with its peers linked beside it, which is how every other
+# profile dependency already behaves, and step 6 verifies that import itself.
 step "Registering the plugin in the DSH profile"
+
 PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
 LINKED="$PROFILE_DIR/node_modules/picturereader"
+DIST_DIR="$DSH_HOME_DIR/picturereader/dist"
 DSH_BIN="$(command -v dsh || true)"
-register_hint() { printf '      dsh plugin --profile %s add "%s"\n' "$PROFILE" "$REPO_ROOT"; }
+
+register_hint() {
+  printf '      cd "%s" && npm pack --pack-destination "%s" && dsh plugin --profile %s add "%s"/picturereader-*.tgz\n' \
+    "$REPO_ROOT" "$DIST_DIR" "$PROFILE" "$DIST_DIR"
+}
+
+# Where the installed plugin actually lives. Profiles are configured with
+# `nodeLinker: hoisted`, so a package installed from a tarball is a real directory
+# inside the profile's node_modules, while `link:` leaves a symlink to the
+# checkout. The distinction is not cosmetic: Node resolves a symlinked package
+# from the checkout's real path, so the walk up from the plugin never reaches the
+# two trees its peers live in — "$DSH_HOME_DIR/profiles/node_modules" (the host's
+# own @deepseek-ai/dsh-* packages, shared by every profile) and the profile's own
+# "node_modules/@deepseek-ai/schemastery".
+installed_from_profile() {
+  local resolved
+  resolved="$(readlink -f "$LINKED" 2>/dev/null || true)"
+  case "$resolved" in
+    "$PROFILE_DIR"/node_modules/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The same thing the host effectively does at boot: import the plugin the way
+# the profile resolves it, from a cwd whose node_modules is the profile's. Only
+# node and the profile directory are needed, so this works on any device; where
+# node is missing the check is skipped rather than failing the install.
+post_install_check() {
+  local out
+  command -v node >/dev/null 2>&1 || { warn "node is not on PATH, so the post-install import check was skipped"; return 0; }
+  if out="$( cd "$PROFILE_DIR" && node --input-type=module -e 'await import("picturereader")' 2>&1 )"; then
+    ok "the profile resolves the plugin and its peers"
+    return 0
+  fi
+  printf '%s\n' "$out" | head -n 20 | sed 's/^/      /' >&2
+  return 1
+}
 
 if [ "$REGISTER_PLUGIN" = 0 ]; then
   warn "skipped (--skip-plugin) — register it yourself with:"
   register_hint
-elif [ -L "$LINKED" ] && [ "$(readlink "$LINKED")" = "$REPO_ROOT" ]; then
-  ok "already linked into the '$PROFILE' profile"
-elif [ "$VERIFY_ONLY" = 1 ]; then
-  if [ -e "$LINKED" ]; then ok "plugin present in the '$PROFILE' profile"
-  else warn "the plugin is NOT registered in the '$PROFILE' profile — re-run without --verify"; fi
 elif [ -z "$DSH_BIN" ]; then
   warn "dsh is not on PATH — the environments are ready, but the plugin is not registered"
   warn "once dsh is installed:"
@@ -461,12 +506,62 @@ elif [ ! -d "$PROFILE_DIR" ]; then
   # has to exist first. Booting DSH once creates it.
   warn "the '$PROFILE' profile does not exist yet — boot DSH once, then run:"
   register_hint
-elif with_heartbeat "dsh plugin --profile $PROFILE add $REPO_ROOT" \
-       "$DSH_BIN" plugin --profile "$PROFILE" add "$REPO_ROOT"; then
-  ok "plugin registered in the '$PROFILE' profile"
+elif [ "$VERIFY_ONLY" = 1 ]; then
+  if [ ! -e "$LINKED" ]; then
+    warn "the plugin is NOT registered in the '$PROFILE' profile — re-run without --verify"
+  elif installed_from_profile; then
+    if post_install_check; then ok "plugin registered in the '$PROFILE' profile from a tarball"
+    else warn "the plugin is installed but the profile cannot import it — re-run without --verify"; fi
+  else
+    warn "the plugin is registered as a LINK to $(readlink -f "$LINKED" 2>/dev/null)"
+    warn "that layout cannot resolve the plugin's peers at boot — re-run without --verify to reinstall it from a tarball"
+  fi
 else
-  warn "dsh plugin did not complete — register it manually with:"
-  register_hint
+  step "Packing the plugin"
+  command -v npm >/dev/null 2>&1 || die "npm is not on PATH (install it with: pkg install nodejs)"
+  VERSION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$REPO_ROOT/package.json" 2>/dev/null || true)"
+  [ -n "$VERSION" ] || die "could not read a version from $REPO_ROOT/package.json"
+  PACK_TMP="$(mktemp -d "$PREFIX/tmp/picturereader-pack.XXXXXX")"
+  TARBALL_NAME="$( cd "$REPO_ROOT" && npm pack --silent --pack-destination "$PACK_TMP" 2>/dev/null | tail -n 1 )"
+  if [ -z "$TARBALL_NAME" ] || [ ! -f "$PACK_TMP/$TARBALL_NAME" ]; then
+    rm -rf "$PACK_TMP"
+    die "npm pack produced no tarball — run it by hand to see why: cd $REPO_ROOT && npm pack"
+  fi
+  # The tarball carries a content hash in its name: pnpm resolves a dependency by
+  # its spec, so a fresh name is what makes a rebuilt checkout reach the profile.
+  PACK_HASH="$(cksum "$PACK_TMP/$TARBALL_NAME" | awk '{print $1}')"
+  TARBALL="$DIST_DIR/picturereader-$VERSION-$PACK_HASH.tgz"
+  mkdir -p "$DIST_DIR"
+  mv "$PACK_TMP/$TARBALL_NAME" "$TARBALL"
+  rm -rf "$PACK_TMP"
+  ok "packed: $TARBALL ($(du -h "$TARBALL" | cut -f1))"
+
+  # An earlier run installed the checkout as a pnpm link: that is the layout that
+  # breaks at boot, so the entry is dropped before the tarball goes in.
+  if [ -e "$LINKED" ] && ! installed_from_profile; then
+    warn "replacing the existing link to $(readlink -f "$LINKED" 2>/dev/null)"
+    "$DSH_BIN" plugin --profile "$PROFILE" remove picturereader >/dev/null 2>&1 || true
+  fi
+
+  step "Installing the packed plugin into the '$PROFILE' profile"
+  if ! with_heartbeat "dsh plugin --profile $PROFILE add $(basename "$TARBALL")" \
+       "$DSH_BIN" plugin --profile "$PROFILE" add "$TARBALL"; then
+    warn "dsh plugin did not complete — register it manually with:"
+    register_hint
+  else
+    ok "plugin registered in the '$PROFILE' profile from $(basename "$TARBALL")"
+    # Prune older tarballs only now: had the add failed, the profile might still
+    # point at the previous one, and deleting it would leave a dangling spec.
+    for stale in "$DIST_DIR"/picturereader-*.tgz; do
+      [ "$stale" = "$TARBALL" ] || rm -f "$stale"
+    done
+    # Gate: the failure this install method exists to prevent is only visible at
+    # boot, so fail here instead of letting the next `dsh web` produce a stack
+    # trace. Nothing device-specific is involved: node plus the profile dir.
+    post_install_check || die "the plugin is installed but the profile cannot import it.
+      The import above is exactly what fails at boot. Do NOT restart DSH yet; to back the registration out:
+        dsh plugin --profile $PROFILE remove picturereader"
+  fi
 fi
 
 # --------------------------------------------------------------------------
@@ -517,6 +612,10 @@ cat <<EOF
   that is correct here is the read-only check:
 
     python3 scripts/install.py --verify
+
+  The plugin is registered from a packed tarball, not from the checkout. Editing
+  files in $REPO_ROOT therefore reaches the profile only after re-running this
+  script (it repacks and reinstalls) and restarting DSH.
 
   Notes for this device:
     * document_to_image handles PDFs only (LibreOffice is deliberately absent).
