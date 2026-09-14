@@ -215,6 +215,7 @@ Runs in the same shared `media` environment as `image_edit` (PyMuPDF, Pillow, Op
 ### Requirements
 
 - **Linux** (this release targets Linux only).
+- **Termux / Android** is *not* installed with the script below: it needs a `proot-distro` Debian rootfs, because Termux is Bionic libc and PyPI's manylinux wheels do not apply there. It therefore lives on the separate [`termux` branch](https://github.com/ThinkForge-core/picturereader/tree/termux) with its own bootstrap (`scripts/termux/setup.sh`). Everything on this branch describes the `linux` build.
 - **Node.js** `^22.19` or `>=24` for DSH itself (per `engines` in `package.json`).
 - **Python 3** to run the installer scripts. The PaddleOCR environment additionally needs an interpreter of **version 3.13 or older**, because `paddlepaddle` publishes no cp314 wheels.
 - **LibreOffice** (headless `soffice`) only if you want `document_to_image` to handle Office formats; it is auto-detected on `PATH` and in the usual Linux install locations.
@@ -566,6 +567,14 @@ node scripts/preview.mjs               # generate fixtures and preview the rende
 - **Hot plugging**: the business logic is concentrated in `src/core.js`, plus the installer-aware path resolution in `src/paths.js`; tools are reloaded dynamically by mtime on each execution. Tool definitions (schemas and descriptions) and settings-card changes require restarting the host.
 - **Repository layout**: `src/` holds the plugin sources, `scripts/` the Python backends (`doc-to-image.py`, `image-edit.py`) and the install/uninstall entry points, `skills/` the bundled image-reading skill, `tests/` the `node:test` suites, and `client.js` the Web settings card.
 - **ZCode build**: lives on the [zcode branch](https://github.com/jing-hy/picturereader/tree/zcode) of this repository (sources under `zcode/`), exposes the tools through an MCP server and is installed with `npm install picturereader-zcode`. Both builds share `src/core.js` and the image-reading skill.
+- **Termux / Android build**: lives on the [termux branch](https://github.com/ThinkForge-core/picturereader/tree/termux) of this repository. It is exactly this `linux` line plus one commit that adds `scripts/termux/setup.sh` and the "Termux / Android" README section — no JavaScript differs between the two branches, so a fix lands on `linux` once and reaches the device with `git merge linux` (no source conflicts by construction).
+
+  ```sh
+  git clone -b termux https://github.com/ThinkForge-core/picturereader.git   # Termux / Android
+  git clone https://github.com/ThinkForge-core/picturereader.git            # Linux (default branch)
+  ```
+
+  Because the branches share all their code and their tests, Termux behaviour is verified on `linux` with `PREFIX=/data/data/com.termux/files/usr npm test`.
 
 ## License
 

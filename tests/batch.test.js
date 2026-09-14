@@ -238,3 +238,42 @@ test('image_batch: output.render produces a readable manifest', async () => {
   assert.match(text, /\[1\] p\.png /);
   assert.match(text, /type=photo/);
 });
+
+test('image_batch: runs on a Cordis-like proxy ctx (no ocrImage seam)', async () => {
+  // Regression: the live plugin ctx is a Cordis proxy that throws
+  // `cannot get property "X" without inject` for anything not declared in
+  // `inject`. Reading the optional ocrImage seam directly crashed EVERY call
+  // with "cannot get property \"ocrImage\" without inject". auto_ocr='never'
+  // keeps this offline: the fallback pipeline is selected but never invoked.
+  const store = { 'p.png': PHOTO_PNG };
+  const { ctx } = makeFakeCtx(store, { ocr: null }); // deliberately no seam
+  const proxy = new Proxy(ctx, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'symbol' || String(prop).startsWith('_')) {
+        return Reflect.get(target, prop, receiver);
+      }
+      if (Reflect.has(target, prop)) return Reflect.get(target, prop, receiver);
+      throw new Error(`cannot get property "${String(prop)}" without inject`);
+    }
+  });
+  const tool = createImageBatchTool(proxy);
+  const result = await tool.execute({ file_paths: ['p.png'], auto_ocr: 'never' }, EXEC);
+  assert.equal(result.processed, 1);
+  assert.equal(result.errors, 0);
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].type, 'photo');
+});
+
+test('image_batch: the ocrImage seam still overrides the real pipeline', async () => {
+  // The defensive read must not silently disable the seam the suite relies on.
+  const calls = [];
+  const seam = async (data, ext) => {
+    calls.push(ext);
+    return { width: 100, height: 100, lines: TEXT_LINES };
+  };
+  const { ctx } = makeFakeCtx({ 'a.png': TEXT_PNG }, { ocr: seam });
+  const tool = createImageBatchTool(ctx);
+  const result = await tool.execute({ file_paths: ['a.png'], auto_ocr: 'always' }, EXEC);
+  assert.equal(calls.length, 1, 'the injected OCR stand-in must be used');
+  assert.equal(result.items[0].type, 'text');
+});

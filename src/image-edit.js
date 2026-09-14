@@ -306,18 +306,26 @@ export function createImageEditTool(ctx) {
         const timeout = ACTION_TIMEOUT_MS[action] || ACTION_TIMEOUT_MS.default;
         const result = runner(reqPath, timeout, exec.signal);
 
-        return {
+        // The harness validates this object against the output schema and
+        // requires lossless JSON: a declared string/integer property must not be
+        // `null`, and no property may be `undefined` (an own key holding
+        // undefined is still a key). exif_read writes no file and reports no
+        // format, so optional fields are OMITTED instead of nulled — otherwise
+        // every call fails with "returned invalid output".
+        const output = {
           ok: true,
           action,
-          out_path: result.out_path ?? out,
-          width: result.width ?? null,
-          height: result.height ?? null,
-          bytes: result.bytes ?? null,
-          format: result.format ?? null,
           summary: result.summary || `image_edit ${action} finished.`,
-          extra: result.extra ?? undefined,
           _baseDir: base,
         };
+        if (typeof result.out_path === 'string' && result.out_path !== '') output.out_path = result.out_path;
+        else if (action !== 'exif_read') output.out_path = out;
+        if (Number.isFinite(result.width)) output.width = result.width;
+        if (Number.isFinite(result.height)) output.height = result.height;
+        if (Number.isFinite(result.bytes)) output.bytes = result.bytes;
+        if (typeof result.format === 'string' && result.format !== '') output.format = result.format;
+        if (result.extra !== undefined && result.extra !== null) output.extra = result.extra;
+        return output;
       } finally {
         // Clean up the input temp dir (the output stays for later tools).
         try {

@@ -107,6 +107,8 @@ test('image_edit: resize builds correct request JSON (action/from/out + params)'
   assert.equal(res.ok, true);
   assert.equal(res.action, 'resize');
   assert.equal(res.width, 100);
+  assert.equal(res.out_path, '/out/resized.png');
+  assert.equal(res.format, 'PNG');
   assert.equal(res.summary, 'test summary ok');
 });
 
@@ -154,32 +156,94 @@ test('image_edit: default timeout used', async () => {
   assert.equal(captured[0].timeoutMs, 120_000);
 });
 
-test('image_edit: remove_background gets longer timeout', async () => {
-  const captured = [];
-  const ctx = makeFakeCtx(
-    { 'a.png': { buffer: Buffer.from('X'), type: 'file' } },
-    captured,
-    { runner: (reqPath, timeoutMs) => {
-        const req = JSON.parse(readFileSync(reqPath, 'utf8'));
-        captured.push({ req, timeoutMs });
-        return { ok: true, action: req.action, out_path: 'x.png', width: 1, height: 1, bytes: 1, format: 'PNG', summary: 'ok' };
-    } }
-  );
-  const tool = createImageEditTool(ctx);
-  await tool.execute({ action: 'remove_background', file_path: 'a.png' }, EXEC);
-  assert.equal(captured[0].timeoutMs, 300_000);
+test('image_edit: slow actions get their own longer timeout', async () => {
+  // The action->timeout table is asserted through the slow actions THIS HOST
+  // OFFERS, not through a hard-coded one. Under Termux the capability profile
+  // withholds remove_background / raw_convert / upscale, so naming them
+  // directly made the suite fail on the termux branch with "action is not
+  // available here"; filtering by the tool's own enum keeps the coverage
+  // (denoise, perspective) on every platform and adds the extras where they
+  // exist.
+  const offered = new Set(createImageEditTool({}).parameters.properties.action.enum);
+  const slow = [
+    ['denoise', 180_000],
+    ['perspective', 120_000],
+    ['remove_background', 300_000],
+    ['upscale', 600_000]
+  ].filter(([action]) => offered.has(action));
+  assert.ok(slow.length >= 2, `this host must offer slow actions, got ${slow.map(([a]) => a)}`);
+
+  for (const [action, timeoutMs] of slow) {
+    const captured = [];
+    const ctx = makeFakeCtx(
+      { 'a.png': { buffer: Buffer.from('X'), type: 'file' } },
+      captured,
+      { runner: (reqPath, timeoutMsArg) => {
+          const req = JSON.parse(readFileSync(reqPath, 'utf8'));
+          captured.push({ req, timeoutMs: timeoutMsArg });
+          return { ok: true, action: req.action, out_path: 'x.png', width: 1, height: 1, bytes: 1, format: 'PNG', summary: 'ok' };
+      } }
+    );
+    await createImageEditTool(ctx).execute({ action, file_path: 'a.png' }, EXEC);
+    assert.equal(captured[0].timeoutMs, timeoutMs, `${action} must use ${timeoutMs}ms`);
+  }
 });
 
-test('image_edit: python error surfaces as tool error', async () => {
+test('image_edit: a backend error surfaces as a tool error', async () => {
+  // Uses an action available on every platform: the point is that a Python-side
+  // error is re-thrown, not which action was running. Asserting /rembg/ here
+  // used to pass on Termux only by accident, because the platform gate throws a
+  // message that also happens to contain "rembg".
   const captured = [];
   const ctx = makeFakeCtx(
     { 'a.png': { buffer: Buffer.from('X'), type: 'file' } },
     captured,
-    { runner: () => { throw new Error('image_edit: remove_background requires rembg...'); } }
+    { runner: () => { throw new Error('image_edit: backend exploded'); } }
   );
   const tool = createImageEditTool(ctx);
   await assert.rejects(
-    tool.execute({ action: 'remove_background', file_path: 'a.png' }, EXEC),
-    /rembg/
+    tool.execute({ action: 'resize', file_path: 'a.png', width: 4, height: 4 }, EXEC),
+    /backend exploded/
   );
+});
+
+test('image_edit: the result is lossless JSON — no null and no undefined fields', async () => {
+  // Regression: the harness validates this object against the output schema and
+  // demands lossless JSON. `width/height/bytes/format: x ?? null` violated the
+  // declared string/integer types, and `extra: result.extra ?? undefined` left
+  // an own key holding undefined — every single image_edit call (all actions)
+  // failed with "returned invalid output" until the fields were omitted instead.
+  const captured = [];
+  const ctx = makeFakeCtx({ 'a.png': { buffer: Buffer.from('X'), type: 'file' } }, captured, {
+    runner: (reqPath) => {
+      captured.push({ req: JSON.parse(readFileSync(reqPath, 'utf8')) });
+      // Shape of a real exif_read result: no output file, no format.
+      return {
+        ok: true,
+        action: 'exif_read',
+        out_path: null,
+        width: 100,
+        height: 80,
+        bytes: 0,
+        format: null,
+        summary: 'read 1 EXIF field',
+        extra: { exif: { Make: 'TestCam' } }
+      };
+    }
+  });
+  const tool = createImageEditTool(ctx);
+  const res = await tool.execute({ action: 'exif_read', file_path: 'a.png' }, EXEC);
+
+  for (const [key, value] of Object.entries(res)) {
+    assert.notEqual(value, null, `"${key}" must not be null`);
+    assert.notEqual(value, undefined, `"${key}" must not be undefined`);
+  }
+  // exif_read writes no file: out_path/format are omitted, not nulled.
+  assert.equal('out_path' in res, false, 'exif_read has no output file');
+  assert.equal('format' in res, false);
+  assert.equal(res.width, 100, 'real integer fields survive');
+  assert.deepEqual(res.extra.exif, { Make: 'TestCam' });
+  // What the harness does with the value must round-trip every remaining key.
+  assert.deepEqual(JSON.parse(JSON.stringify(res)), res);
+  assert.doesNotThrow(() => structuredClone(res));
 });
