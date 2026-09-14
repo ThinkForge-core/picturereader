@@ -314,27 +314,73 @@ The plugin therefore keeps its Python environments inside a `proot-distro`
 Debian rootfs, where the glibc is manylinux-compatible and every dependency
 resolves to a prebuilt aarch64 wheel. Nothing is ever compiled.
 
-This is the **Termux branch**. Clone it with `-b termux`; the Linux build is
-the default branch and is cloned without a branch argument:
+This is the **Termux branch**. On a device you run **one** script, and it is not
+`scripts/install.py`:
 
-```sh
-# In Termux:
-git clone -b termux https://github.com/ThinkForge-core/picturereader.git
-cd picturereader
+| | Linux / desktop | Termux / Android |
+|---|---|---|
+| Branch | `linux` (the default branch) | `termux` |
+| Installer | `python3 scripts/install.py` | `bash scripts/termux/setup.sh` |
+| Python environments | `~/.dsh/picturereader/venvs/` | inside a `proot-distro` Debian rootfs |
+| Why | glibc, so manylinux wheels resolve | Bionic, so those wheels do not exist |
 
-# Linux / desktop (default branch):
-# git clone https://github.com/ThinkForge-core/picturereader.git
-```
+`scripts/install.py` cannot install on a device: it creates the environments with
+`pip` **inside Termux**, where `opencv-python-headless` and friends have no wheel,
+so it fails partway and rewrites the state file on the way. `setup.sh` does the
+same job the proot way, so it **replaces** the installer rather than following it.
+The one `install.py` mode that is correct on a device is the read-only check, and
+that is the last step below.
 
-The two builds differ by exactly this section and `scripts/termux/setup.sh`:
-no JavaScript and no test differs between them, so on a device you can also take
-the `linux` branch and add the script yourself. Then run the bootstrap:
+The two builds differ by exactly this section and `scripts/termux/setup.sh`: no
+JavaScript and no test differs between them.
 
-```sh
-# In Termux, from the plugin checkout:
-bash scripts/termux/setup.sh            # install or repair
-bash scripts/termux/setup.sh --verify   # check without changing anything
-```
+### Steps
+
+1. **Get Termux** from F-Droid or the Termux GitHub releases. The Play Store
+   build is stale and its packaging behaves differently.
+
+2. **Clone and bootstrap.** `setup.sh` installs `proot-distro` and Termux's own
+   `python3`, creates a Debian rootfs, and builds both environments inside it:
+
+   ```sh
+   pkg install -y git
+   git clone -b termux https://github.com/ThinkForge-core/picturereader.git
+   cd picturereader
+   bash scripts/termux/setup.sh
+   ```
+
+   Budget 10–20 minutes and roughly 1.5 GB: the rootfs, then
+   PyMuPDF/Pillow/OpenCV, then RapidOCR + ONNX Runtime, then the OCR models. The
+   script is idempotent — re-running it repairs the environments in place.
+   `bash scripts/termux/setup.sh --help` lists the flags (`--verify`,
+   `--profile <name>`, `--skip-plugin`).
+
+3. **Export the interpreters** (recommended on a device). Add to `~/.bashrc`:
+
+   ```sh
+   cat >> ~/.bashrc <<'EOF'
+   export DSH_MEDIA_PYTHON="$PREFIX/bin/picturereader-media-python"
+   export DSH_OCR_PYTHON="$PREFIX/bin/picturereader-ocr-python"
+   export DSH_OCR_THREADS=2
+   EOF
+   source ~/.bashrc
+   ```
+
+   They always win over the state file, and `DSH_OCR_THREADS=2` stops ONNX
+   Runtime from keeping every core busy for a whole OCR run — on a phone that is
+   the difference between a warm device and a hot, flat one.
+
+4. **Check** (read-only, safe any time):
+
+   ```sh
+   python3 scripts/install.py --verify
+   ```
+
+5. **Restart DSH** if it was already running. The bootstrap registers the plugin
+   in the `web` profile; a running host picks up tool changes only after a
+   restart.
+
+### What the bootstrap does
 
 The script installs `proot-distro`, creates a Debian rootfs, and builds two
 environments inside it:
@@ -350,10 +396,15 @@ Each gets a small wrapper in `$PREFIX/bin` (`picturereader-media-python`,
 paths, so script and image paths mean the same thing on both sides and no path
 translation is needed.
 
-The script then writes both interpreters into the state file, and prints the
-`DSH_MEDIA_PYTHON` / `DSH_OCR_PYTHON` variables you can export instead. Prefer
-the variables on a device: re-running `scripts/install.py` rewrites the state
-file and would drop those entries.
+It then writes both interpreters into the state file, and adds the plugin to the
+`web` profile with `dsh plugin --profile web add <checkout>` — the same
+registration step `install.py` performs on Linux, repeated here because on a
+device it is the only part of `install.py` that could work. If `dsh` is not on
+`PATH`, or the profile does not exist yet, that step prints the exact command to
+run later instead of failing.
+
+Prefer the environment variables over the state file on a device: re-running
+`scripts/install.py` rewrites the state file and would drop those entries.
 
 Deliberately **not** installed:
 

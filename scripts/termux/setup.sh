@@ -33,8 +33,11 @@
 # The script is idempotent: re-running it repairs the environments in place.
 #
 # Usage:
-#   bash scripts/termux/setup.sh              # install or repair
-#   bash scripts/termux/setup.sh --verify     # check without changing anything
+#   bash scripts/termux/setup.sh                  # install or repair, then register in DSH
+#   bash scripts/termux/setup.sh --verify         # check only, change nothing
+#   bash scripts/termux/setup.sh --profile tui    # register in a profile other than "web"
+#   bash scripts/termux/setup.sh --skip-plugin    # environments only, no DSH registration
+#   bash scripts/termux/setup.sh --help
 
 set -euo pipefail
 
@@ -43,6 +46,7 @@ ROOT_VENVS="/opt/picturereader"                          # inside the rootfs
 RAPIDOCR_PIN="rapidocr==3.9.2"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 REQ_DIR="$SCRIPT_DIR/../requirements"
 
 # --------------------------------------------------------------------------
@@ -56,7 +60,20 @@ warn() { printf '  %s!%s %s\n' "$YELLOW" "$OFF" "$*"; }
 die()  { printf '\n%serror:%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
 
 VERIFY_ONLY=0
-[ "${1:-}" = "--verify" ] && VERIFY_ONLY=1
+PROFILE="${PICREADER_PROFILE:-web}"
+REGISTER_PLUGIN=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --verify)     VERIFY_ONLY=1 ;;
+    --profile)    shift; [ $# -gt 0 ] || die "--profile needs a profile name"; PROFILE="$1" ;;
+    --profile=*)  PROFILE="${1#*=}" ;;
+    --skip-plugin) REGISTER_PLUGIN=0 ;;
+    -h|--help)    sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)            die "unknown argument: $1 (try --help)" ;;
+  esac
+  shift
+done
+[ -n "$PROFILE" ] || die "--profile must not be empty"
 
 printf '%spicturereader — Termux setup (level 3)%s\n' "$BOLD" "$OFF"
 
@@ -96,9 +113,16 @@ fi
 # 1. proot-distro + the Debian rootfs
 # --------------------------------------------------------------------------
 step "Installing proot-distro and the Debian rootfs"
-if ! command -v proot-distro >/dev/null 2>&1; then
-  [ "$VERIFY_ONLY" = 1 ] && die "proot-distro is not installed"
-  pkg install -y proot-distro
+# Termux's own python3 is installed here as well, even though both environments
+# live inside the rootfs: step 5 writes the state file with it, and it is what
+# runs `install.py --verify` at the end. On a bare Termux it is absent, and
+# without this the script would die at set -e after an hour of downloads.
+NEED_PKGS=""
+command -v proot-distro >/dev/null 2>&1 || NEED_PKGS="proot-distro"
+command -v python3      >/dev/null 2>&1 || NEED_PKGS="${NEED_PKGS:+$NEED_PKGS }python3"
+if [ -n "$NEED_PKGS" ]; then
+  [ "$VERIFY_ONLY" = 1 ] && die "missing from Termux: $NEED_PKGS (install with: pkg install -y $NEED_PKGS)"
+  pkg install -y $NEED_PKGS
 fi
 ok "proot-distro: $(proot-distro --version 2>/dev/null || echo present)"
 
@@ -251,9 +275,51 @@ PY
 fi
 
 # --------------------------------------------------------------------------
+# 6. register the plugin itself in a DSH profile
+# --------------------------------------------------------------------------
+# Building the interpreters is only half an installation: the plugin also has to
+# be added to the profile's bundle stack, which `install.py` normally does with
+# `dsh plugin ... add`. On a device that call is the ONLY part of `install.py`
+# that can work (it never builds a venv), so it is repeated here instead of
+# telling the operator to run an installer that would fail on Termux.
+step "Registering the plugin in the DSH profile"
+PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
+LINKED="$PROFILE_DIR/node_modules/picturereader"
+DSH_BIN="$(command -v dsh || true)"
+register_hint() { printf '      dsh plugin --profile %s add "%s"\n' "$PROFILE" "$REPO_ROOT"; }
+
+if [ "$REGISTER_PLUGIN" = 0 ]; then
+  warn "skipped (--skip-plugin) — register it yourself with:"
+  register_hint
+elif [ -L "$LINKED" ] && [ "$(readlink "$LINKED")" = "$REPO_ROOT" ]; then
+  ok "already linked into the '$PROFILE' profile"
+elif [ "$VERIFY_ONLY" = 1 ]; then
+  if [ -e "$LINKED" ]; then ok "plugin present in the '$PROFILE' profile"
+  else warn "the plugin is NOT registered in the '$PROFILE' profile — re-run without --verify"; fi
+elif [ -z "$DSH_BIN" ]; then
+  warn "dsh is not on PATH — the environments are ready, but the plugin is not registered"
+  warn "once dsh is installed:"
+  register_hint
+elif [ ! -d "$PROFILE_DIR" ]; then
+  # `dsh plugin` forwards to pnpm inside the profile directory, so the profile
+  # has to exist first. Booting DSH once creates it.
+  warn "the '$PROFILE' profile does not exist yet — boot DSH once, then run:"
+  register_hint
+elif "$DSH_BIN" plugin --profile "$PROFILE" add "$REPO_ROOT"; then
+  ok "plugin registered in the '$PROFILE' profile"
+else
+  warn "dsh plugin did not complete — register it manually with:"
+  register_hint
+fi
+
+# --------------------------------------------------------------------------
 # summary
 # --------------------------------------------------------------------------
-printf '\n%s%s✓ done%s\n' "$BOLD" "$GREEN" "$OFF"
+if [ "$VERIFY_ONLY" = 1 ]; then
+  printf '\n%s%s✓ verification finished%s\n' "$BOLD" "$GREEN" "$OFF"
+else
+  printf '\n%s%s✓ done%s\n' "$BOLD" "$GREEN" "$OFF"
+fi
 cat <<EOF
 
   The plugin now finds both interpreters:
@@ -275,7 +341,11 @@ cat <<EOF
        for a whole OCR run, which heats the device and drains the battery:
          export DSH_OCR_THREADS=2
 
-  Check it:
+  Do NOT run the Linux installer on this device: "python3 scripts/install.py"
+  creates the environments with pip inside Termux, where the wheels do not
+  exist, so it fails — and it rewrites the state file on the way. The one mode
+  that is correct here is the read-only check:
+
     python3 scripts/install.py --verify
 
   Notes for this device:
