@@ -472,6 +472,18 @@ fi
 # --------------------------------------------------------------------------
 # summary
 # --------------------------------------------------------------------------
+# DSH_MEDIA_PYTHON, DSH_OCR_PYTHON and DSH_OCR_THREADS are read by the DSH host
+# process (src/paths.js, src/core.js), never by the guest, so exporting them only
+# helps if the file that gets read belongs to the shell that launches DSH. That
+# shell is not necessarily bash, and a name hard-coded to ~/.bashrc is silently
+# ignored under zsh or fish.
+case "$(basename "${SHELL:-bash}")" in
+  bash) SHELL_RC="~/.bashrc" ;;
+  zsh)  SHELL_RC="~/.zshrc" ;;
+  fish) SHELL_RC="~/.config/fish/config.fish" ;;
+  *)    SHELL_RC="the startup file of ${SHELL:-your shell}" ;;
+esac
+
 TOTAL_SECONDS=$(( $(date +%s) - SCRIPT_START ))
 if [ "$VERIFY_ONLY" = 1 ]; then
   printf '\n%s%s✓ verification finished in %s%s\n' "$BOLD" "$GREEN" "$(elapsed_human $TOTAL_SECONDS)" "$OFF"
@@ -490,8 +502,8 @@ cat <<EOF
        NOTE: re-running "python3 scripts/install.py" rewrites that file and
        drops these entries, so on a Termux device prefer option 2.
 
-    2. environment variables, exported from Termux (~/.bashrc) and inherited
-       by DSH. They always win over the state file:
+    2. environment variables, exported from the shell that launches DSH and
+       inherited by it ($SHELL_RC here). They always win over the state file:
          export DSH_MEDIA_PYTHON="$MEDIA_WRAPPER"
          export DSH_OCR_PYTHON="$OCR_WRAPPER"
 

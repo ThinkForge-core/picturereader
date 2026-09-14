@@ -372,20 +372,25 @@ JavaScript and no test differs between them.
    `PICREADER_HEARTBEAT=0` silences the ticker; `PICREADER_DISTRO` and
    `PICREADER_PROFILE` override the defaults (`debian`, `web`).
 
-3. **Export the interpreters** (recommended on a device). Add to `~/.bashrc`:
+3. **Export the interpreters** (recommended, independent of the state file).
+   These variables are read by the DSH host process, never by the guest, so they
+   belong in the startup file of the shell that **launches DSH** — which is not
+   necessarily bash, and `~/.bashrc` is silently ignored when it is zsh or fish:
 
    ```sh
-   cat >> ~/.bashrc <<'EOF'
+   RC=~/.zshrc        # or ~/.bashrc; fish uses ~/.config/fish/config.fish
+   cat >> "$RC" <<'EOF'
    export DSH_MEDIA_PYTHON="$PREFIX/bin/picturereader-media-python"
    export DSH_OCR_PYTHON="$PREFIX/bin/picturereader-ocr-python"
    export DSH_OCR_THREADS=2
    EOF
-   source ~/.bashrc
+   source "$RC"
    ```
 
-   They always win over the state file, and `DSH_OCR_THREADS=2` stops ONNX
-   Runtime from keeping every core busy for a whole OCR run — on a phone that is
-   the difference between a warm device and a hot, flat one.
+   Fish spells these `set -gx DSH_OCR_THREADS 2` instead of `export`. They always
+   win over the state file, and `DSH_OCR_THREADS=2` stops ONNX Runtime from
+   keeping every core busy for a whole OCR run — on a phone that is the
+   difference between a warm device and a hot, flat one.
 
 4. **Check** (read-only, safe any time):
 
