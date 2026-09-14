@@ -310,6 +310,22 @@ The plugin therefore keeps its Python environments inside a `proot-distro`
 Debian rootfs, where the glibc is manylinux-compatible and every dependency
 resolves to a prebuilt aarch64 wheel. Nothing is ever compiled.
 
+This is the **Termux branch**. Clone it with `-b termux`; the Linux build is
+the default branch and is cloned without a branch argument:
+
+```sh
+# In Termux:
+git clone -b termux https://github.com/ThinkForge-core/picturereader.git
+cd picturereader
+
+# Linux / desktop (default branch):
+# git clone https://github.com/ThinkForge-core/picturereader.git
+```
+
+The two builds differ by exactly this section and `scripts/termux/setup.sh`:
+no JavaScript and no test differs between them, so on a device you can also take
+the `linux` branch and add the script yourself. Then run the bootstrap:
+
 ```sh
 # In Termux, from the plugin checkout:
 bash scripts/termux/setup.sh            # install or repair
