@@ -7,10 +7,16 @@ size on disk, and asks about each one before touching it. Anything it did not
 create is reported as unmanaged and skipped, so a picturereader install can
 never take unrelated files with it.
 
+An environment that sits under our own install prefix but is missing from the
+state file — an interrupted install, a tree re-created by ``--force`` — is
+discovered too. A wipe that stopped at the state file would silently leave
+gigabytes on disk, which is exactly the case this script exists to prevent.
+
     python3 scripts/uninstall.py                 # interactive
     python3 scripts/uninstall.py --dry-run       # show the inventory and sizes
     python3 scripts/uninstall.py --yes           # remove everything it manages
     python3 scripts/uninstall.py --keep-venvs    # unregister the plugin, keep Python envs
+    python3 scripts/uninstall.py --venvs-only -y # wipe every Python environment, keep the rest
 
 @module scripts/uninstall
 """
@@ -55,6 +61,90 @@ def state_path():
 
 def expand(value):
     return Path(os.path.expanduser(str(value)))
+
+
+def default_install_root():
+    """Where install.py keeps its state file and its environments."""
+    return dsh_home() / "picturereader"
+
+
+def default_venvs_dir():
+    return default_install_root() / "venvs"
+
+
+def looks_like_venv(path):
+    """True when *path* is a Python virtual environment.
+
+    Checked structurally rather than by name: an environment can be left behind
+    by an interrupted install, or re-created under a role name the state file no
+    longer mentions, and both must still be offered for removal.
+    """
+    if not path.is_dir():
+        return False
+    if (path / "pyvenv.cfg").is_file():
+        return True
+    return (path / "bin" / "python").exists()
+
+
+def discover_orphans(venvs_dir, known):
+    """Environments inside *venvs_dir* that *known* does not list.
+
+    Only the environments directory itself is scanned — never its parent. The
+    parent is ours only when the default prefix is in use; with a custom
+    ``--venv-prefix /opt/venvs`` it is ``/opt``, and sweeping it would offer
+    unrelated environments as ours (and delete them under ``--yes``). A
+    half-created environment always lives inside the prefix, so nothing
+    legitimate is lost by staying here.
+    """
+    venvs_dir = Path(venvs_dir)
+    known = {Path(p) for p in known}
+    if not venvs_dir.is_dir():
+        return []
+
+    found = []
+    for candidate in sorted(venvs_dir.iterdir()):
+        if candidate in known or not looks_like_venv(candidate):
+            continue
+        known.add(candidate)
+        found.append(candidate)
+    return found
+
+
+def prune_empty_prefix(console, install_root, dry_run):
+    """Drop the leaf directories left behind once every environment is gone."""
+    if not install_root.exists():
+        return
+    for candidate in (install_root / "venvs", install_root):
+        try:
+            if not candidate.is_dir() or any(candidate.iterdir()):
+                continue
+            if dry_run:
+                console.out("  would prune empty %s" % candidate)
+                continue
+            candidate.rmdir()
+            console.ok("pruned empty %s" % candidate)
+        except OSError:
+            pass
+
+
+def sync_state_venvs(console, path, state, dry_run):
+    """Drop state entries whose environment is gone, so the file stays truthful."""
+    venvs = state.get("venvs") or {}
+    alive = {role: record for role, record in venvs.items() if Path(record.get("path") or "").exists()}
+    if len(alive) == len(venvs):
+        return
+    dropped = sorted(set(venvs) - set(alive))
+    if dry_run:
+        console.out("  would drop %s from the state file" % ", ".join(dropped))
+        return
+    if not path.exists():
+        return  # the state file itself was a component and is already gone
+    state["venvs"] = alive
+    try:
+        path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        console.ok("state file updated (dropped %s)" % ", ".join(dropped))
+    except OSError as exc:
+        console.warn("could not update %s: %s" % (path, exc))
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +194,14 @@ class Component:
 
 
 def build_inventory(console, state, purge_external):
-    """Turn the state file into a list of components to offer for removal."""
+    """Turn the state file into a list of components to offer for removal.
+
+    ``state`` may be None — a missing state file means the installer did not
+    write one, not that environments under our own prefix may stay on disk
+    forever. Those are discovered and offered regardless.
+    """
     components = []
-    if state is None:
-        return components
+    state = state or {}
 
     # --- plugin installs --------------------------------------------------
     for profile, record in (state.get("plugin", {}).get("profiles") or {}).items():
@@ -171,6 +265,23 @@ def build_inventory(console, state, purge_external):
 
     # --- state file -------------------------------------------------------
     components.append(Component("state", "installer state file", state_path(), managed=True, action="delete"))
+
+    # --- environments the state file does not mention ----------------------
+    # The prefix is ours by construction, so anything venv-shaped inside it is
+    # ours too. This is what makes --venvs-only a real wipe rather than a
+    # removal of the roles the state file happens to remember.
+    prefix = expand(state.get("prefix") or default_venvs_dir())
+    for orphan in discover_orphans(prefix, [c.path for c in components]):
+        components.append(
+            Component(
+                "venv",
+                "orphaned Python environment %r" % orphan.name,
+                orphan,
+                managed=True,
+                detail="found under the install prefix; not recorded in the state file",
+                action="delete",
+            )
+        )
 
     # --- explicitly requested external paths ------------------------------
     for raw in purge_external:
@@ -384,9 +495,43 @@ def selftest():
         check("remove_tree deletes the tree", not root.exists())
         check("remove_tree reports freed bytes", freed > 0, freed)
 
+    # orphan discovery and prefix pruning
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "picturereader"
+        venvs = root / "venvs"
+        (venvs / "media" / "bin").mkdir(parents=True)
+        (venvs / "media" / "bin" / "python").write_bytes(b"")
+        (venvs / "leftover").mkdir()
+        (venvs / "leftover" / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
+        (venvs / "not-a-venv").mkdir()
+        (root / "env.json").write_text("{}\n", encoding="utf-8")
+
+        check("looks_like_venv detects pyvenv.cfg", looks_like_venv(venvs / "leftover"))
+        check("looks_like_venv detects bin/python", looks_like_venv(venvs / "media"))
+        check("looks_like_venv rejects a plain directory", not looks_like_venv(venvs / "not-a-venv"))
+        check("looks_like_venv rejects a file", not looks_like_venv(root / "env.json"))
+
+        found = discover_orphans(venvs, [venvs / "media"])
+        check("orphan discovery finds only the unrecorded environment", [p.name for p in found] == ["leftover"], [str(p) for p in found])
+
+        console = Console(level=Console.QUIET, color="never")
+        prune_empty_prefix(console, root, dry_run=True)
+        check("a populated prefix survives a prune", venvs.exists())
+
+        for name in ("media", "leftover", "not-a-venv"):
+            shutil.rmtree(venvs / name)
+        prune_empty_prefix(console, root, dry_run=False)
+        check("prune removes the empty venvs directory", not venvs.exists())
+        check("prune keeps the root while the state file remains", root.exists())
+
+        (root / "env.json").unlink()
+        prune_empty_prefix(console, root, dry_run=False)
+        check("prune removes the root once nothing is left", not root.exists())
+
     # state parsing helpers
     check("state path lives under DSH home", str(state_path()).endswith("picturereader/env.json"), state_path())
     check("expand handles a home-relative path", str(expand("~/.x")).startswith(str(Path.home())), expand("~/.x"))
+    check("the default venvs dir is <dsh home>/picturereader/venvs", str(default_venvs_dir()).endswith("picturereader/venvs"), default_venvs_dir())
 
     print("")
     if failures:
@@ -410,6 +555,7 @@ def parse_args(argv):
     parser.add_argument("--dry-run", action="store_true", help="show the inventory and what would be removed, change nothing")
     parser.add_argument("--yes", "-y", action="store_true", help="remove every managed component without asking")
     parser.add_argument("--keep-venvs", action="store_true", help="unregister the plugin but keep the Python environments")
+    parser.add_argument("--venvs-only", action="store_true", help="remove only the Python environments and prune the empty prefix; keep the plugin, caches, skills and state file")
     parser.add_argument("--skip-plugin", action="store_true", help="keep the plugin registered; only remove environments and caches")
     parser.add_argument("--purge-external", action="append", default=[], metavar="PATH", help="also delete this path (repeatable); it is not recorded in the state file")
     parser.add_argument("--json", action="store_true", help="print a machine-readable summary on stdout")
@@ -443,35 +589,42 @@ def main(argv=None):
     console.raw(console.bold("picturereader uninstaller"))
 
     path = state_path()
-    if not path.exists():
-        console.raw("")
-        console.err("no state file at %s" % path)
-        console.out("  This means the installation was not created by scripts/install.py, so the uninstaller")
-        console.out("  cannot know what belongs to it. Nothing was removed.")
+    state = None
+    if path.exists():
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            console.err("the state file at %s is unreadable: %s" % (path, exc))
+            return 1
+        console.out("  installed:  %s" % state.get("installed_at", "unknown"))
+        console.out("  source:     %s" % (state.get("plugin", {}).get("source") or "unknown"))
+        console.out("  prefix:     %s" % state.get("prefix", "unknown"))
+    else:
+        console.warn("no state file at %s" % path)
+        console.out("  The installer did not write it, so nothing here knows what belongs to it.")
+        console.out("  Environments under the install prefix are still discovered and offered.")
         console.out("")
         console.out("  To unregister the plugin by hand:  dsh plugin --profile <name> remove picturereader")
         if args.purge_external:
-            console.out("  You may still target explicit paths with --purge-external (they are deleted verbatim).")
-        if args.json:
-            print(json.dumps({"ok": False, "reason": "no state file", "state_file": str(path)}, indent=2))
-        return 1
+            console.out("  Explicit --purge-external paths are deleted verbatim.")
 
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        console.err("the state file at %s is unreadable: %s" % (path, exc))
-        return 1
-
-    console.out("  installed:  %s" % state.get("installed_at", "unknown"))
-    console.out("  source:     %s" % (state.get("plugin", {}).get("source") or "unknown"))
-    console.out("  prefix:     %s" % state.get("prefix", "unknown"))
+    install_root = expand((state or {}).get("prefix") or default_venvs_dir()).parent
 
     components = build_inventory(console, state, args.purge_external)
+    if args.venvs_only and args.keep_venvs:
+        console.raw("")
+        console.err("--venvs-only and --keep-venvs contradict each other; pick one")
+        return 2
     if args.keep_venvs:
         for component in components:
             if component.kind == "venv":
                 component.managed = False
                 component.detail = "kept (--keep-venvs)"
+    if args.venvs_only:
+        for component in components:
+            if component.kind != "venv":
+                component.managed = False
+                component.detail = "kept (--venvs-only)"
     if args.skip_plugin:
         for component in components:
             if component.kind == "plugin":
@@ -483,12 +636,27 @@ def main(argv=None):
 
     if not components:
         console.raw("")
-        console.out("  the state file lists nothing to remove")
+        if state is None:
+            console.out("  nothing to remove: no state file, and no environment under %s" % install_root)
+        else:
+            console.out("  the state file lists nothing to remove")
+        # `--json` is a contract: emit the summary shape even when it is empty,
+        # rather than printing nothing at all.
+        if args.json:
+            print(
+                json.dumps(
+                    {"ok": True, "removed": [], "kept": [], "freed_bytes": 0, "state_file_removed": False},
+                    indent=2,
+                )
+            )
         return 0
 
     print_inventory(console, components)
 
     if args.dry_run:
+        prune_empty_prefix(console, install_root, dry_run=True)
+        if state is not None:
+            sync_state_venvs(console, path, state, dry_run=True)
         console.raw("")
         console.raw("  dry run: nothing was removed")
         if args.json:
@@ -524,6 +692,10 @@ def main(argv=None):
             console.out("  keeping %s" % (component.label,))
             kept.append(component.label)
 
+    prune_empty_prefix(console, install_root, dry_run=False)
+    if state is not None:
+        sync_state_venvs(console, path, state, dry_run=False)
+
     console.raw("")
     console.raw(console.green(console.bold("  Uninstall finished in %s" % human_duration(time.time() - started))))
     console.out("  removed:  %d component(s), %s freed" % (len(removed), human_size(removed_bytes)))
@@ -534,6 +706,10 @@ def main(argv=None):
     console.out("    - Restart DSH so the plugin and its settings card are unloaded.")
     console.out("    - If you exported DSH_* variables by hand (e.g. in your shell profile), remove them.")
     console.out("    - An `ocr_engine` key may still sit in ~/.dsh/settings.yaml; the plugin ignores it now.")
+    survivors = [c for c in components if c.kind == "venv" and c.path.exists()]
+    if survivors:
+        console.out("    - %d Python environment(s) are still on disk under the install prefix;" % len(survivors))
+        console.out("      rerun with --venvs-only --yes to remove just those.")
     console.raw("")
 
     if args.json:

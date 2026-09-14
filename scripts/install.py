@@ -570,6 +570,21 @@ def install_plugin(cfg, console):
         installed = profile_dir / "node_modules" / "picturereader"
         entry = {"profile": profile, "dir": str(installed), "method": None, "bundles_entry": None}
 
+        # A development checkout is wired into the profile as a symlink (pnpm's
+        # `link:` dependency). That is already a complete, working install:
+        # re-running pnpm over it is pointless, and copying the tree over it
+        # would fight the checkout the user is editing.
+        if installed.is_symlink() and installed.resolve() == Path(cfg["source"]).resolve():
+            console.step(
+                "Plugin already linked into profile %r" % profile,
+                "the development symlink to %s is left exactly as it is" % cfg["source"],
+            )
+            entry["method"] = "link"
+            entry["spec"] = "link:%s" % cfg["source"]
+            verify_plugin_registration(profile_dir, profile, console, entry)
+            results[profile] = entry
+            continue
+
         if cfg["pnpm"] is not None and cfg["dsh"] is not None:
             console.step(
                 "Registering the plugin in DSH profile %r" % profile,
@@ -607,7 +622,13 @@ def materialize_plugin(source, profile_dir, installed, console):
         ".git", "node_modules", "tests", "fixtures-out", ".npmcache-local", "__pycache__", "*.pyc"
     )
     with console.heartbeat("copying the plugin tree to %s" % installed):
-        if installed.exists():
+        if installed.is_symlink():
+            # `Path.exists()` follows the link, but `shutil.rmtree` refuses to
+            # remove a symlink, so a pre-existing link aborted the install here
+            # with "Cannot call rmtree on a symbolic link". Break the link, then
+            # let the copytree below put a real tree in its place.
+            installed.unlink()
+        elif installed.exists():
             shutil.rmtree(installed)
         profile_dir.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, installed, ignore=ignore)
