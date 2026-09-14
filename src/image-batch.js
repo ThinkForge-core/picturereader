@@ -47,6 +47,29 @@ async function importCore() {
 /** The most recent core module, used by the synchronous output.render. */
 let latestCore = null;
 
+/**
+ * Read an OPTIONAL test seam off the plugin context.
+ *
+ * The live `ctx` is a Cordis proxy whose `get` trap throws
+ * `cannot get property "X" without inject` for anything not declared through
+ * `inject`/`provide`. Underscore-prefixed names are exempt from the trap, which
+ * is why `_imageEditRunner` happens to work; a public seam name does not. The
+ * test suite sets the seam on a plain object, so reading it directly crashes
+ * the tool in production — read it defensively instead.
+ *
+ * @param ctx - the plugin context (a proxy in production, a plain object in tests).
+ * @param name - property holding the seam function.
+ * @returns the seam function, or undefined when this context does not provide one.
+ */
+function readOptionalSeam(ctx, name) {
+  try {
+    const value = ctx?.[name];
+    return typeof value === 'function' ? value : undefined;
+  } catch {
+    return undefined; // not provided (and not injectable) on this context
+  }
+}
+
 // ---------------------------------------------------------------------------
 // defaults
 // ---------------------------------------------------------------------------
@@ -271,8 +294,9 @@ export function createImageBatchTool(ctx) {
 
       const core = await importCore();
       latestCore = core;
-      // Test seam: ctx.ocrImage replaces the real OCR pipeline.
-      const ocrFn = typeof ctx.ocrImage === 'function' ? ctx.ocrImage : core.ocrImage.bind(core);
+      // Test seam: ctx.ocrImage replaces the real OCR pipeline. Never read the
+      // proxy property directly — see readOptionalSeam.
+      const ocrFn = readOptionalSeam(ctx, 'ocrImage') ?? core.ocrImage.bind(core);
 
       const cwd = exec.agent?.session?.header?.cwd;
       const items = [];
@@ -366,8 +390,9 @@ export function createImageBatchTool(ctx) {
       const results = new Map(); // index -> { lines, note }
       const runOcr = async (item) => {
         try {
-          // PaddleOCR is the only engine; the recognition model is selected by
-          // the plugin's configured OCR language, when one is set.
+          // The engine is whichever venv is installed (RapidOCR by default);
+          // the recognition model is selected by the plugin's configured OCR
+          // language, when one is set.
           const language = String(getRuntimeConfig().ocr?.language ?? '');
           const res = await ocrFn(item.raw, item.ext, {
             ...(language !== '' ? { language } : {})

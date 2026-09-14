@@ -1,11 +1,19 @@
 /**
  * OCR tests.
  *
- * PaddleOCR is the only OCR engine, so the tests that actually recognize text
- * need the installer-managed `paddle` venv. When that environment is absent
- * they are skipped instead of failing, which keeps the suite green on a fresh
- * checkout; everything that does not need the engine (crop, PNG encode,
- * language mapping, the "environment missing" error path) always runs.
+ * v3.4.0 made RapidOCR the default engine: the `ocr` venv wins when it is
+ * installed and the legacy `paddle` venv is only a fallback (see
+ * core.js/ocrEngine). Two families of tests therefore gate differently:
+ *
+ *   - the `image_ocr` tool tests drive the engine-agnostic path (ocrFile) and
+ *     need whichever engine is installed — they assert the RapidOCR contract
+ *     because that is what scripts/install.py provisions by default;
+ *   - `ocrImage` / `runPaddleOcr` are the legacy PaddleOCR-only primitives and
+ *     need the `paddle` venv specifically.
+ *
+ * A missing venv skips the engine-backed tests instead of failing, which keeps
+ * the suite green on a fresh checkout; everything that does not need an engine
+ * (crop, PNG encode, language mapping, argument validation) always runs.
  */
 
 import test from 'node:test';
@@ -18,10 +26,12 @@ import {
   encodePng,
   ocrImage,
   decodeImage,
+  ocrPython,
   paddleAvailable,
   paddlePython,
   paddleLangFor,
-  PADDLE_DEFAULT_LANG
+  PADDLE_DEFAULT_LANG,
+  RAPID_AUTO_LANGS
 } from '../src/core.js';
 import { createImageOcrTool } from '../src/tool.js';
 import { makeQuadrantRgba } from './fixtures.mjs';
@@ -30,9 +40,17 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, 'fixtures-out', 'ocr-test.png');
 const CHECKED_IN_FIXTURE = join(HERE, 'fixtures', 'ocr-text.png');
 
-/** Whether the PaddleOCR environment is installed (gates the real OCR tests). */
+/** Whether the legacy PaddleOCR environment is installed. */
 const PADDLE_READY = existsSync(paddlePython());
 const NEED_PADDLE = PADDLE_READY ? false : `PaddleOCR venv not found at ${paddlePython()} — run: python3 scripts/install.py`;
+
+/**
+ * Whether the default RapidOCR environment is installed. The tool-level tests
+ * assert its contract (`engine=rapid`, model keys instead of BCP-47 tags), so
+ * they skip rather than fall back to the legacy engine on a paddle-only host.
+ */
+const RAPID_READY = existsSync(ocrPython());
+const NEED_RAPID = RAPID_READY ? false : `RapidOCR venv not found at ${ocrPython()} — run: python3 scripts/install.py`;
 
 /** Provide the text-bearing test image from the checked-in fixture. */
 function ensureOcrTestImage() {
@@ -155,14 +173,15 @@ function makeFakeCtx(bytes) {
 
 const EXEC = { signal: undefined, agent: { session: { header: { cwd: '/work' } } } };
 
-test('image_ocr: a missing environment produces an actionable error', { skip: PADDLE_READY ? 'PaddleOCR is installed' : false }, async () => {
+test('image_ocr: a missing environment produces an actionable error', { skip: (RAPID_READY || PADDLE_READY) ? 'an OCR engine is installed' : false }, async () => {
   ensureOcrTestImage();
   const { readFileSync } = await import('node:fs');
   const { ctx } = makeFakeCtx(readFileSync(OUT));
   const tool = createImageOcrTool(ctx);
+  // v3.4.0: neither venv present -> ocrFile reports the engine-agnostic error.
   await assert.rejects(
     () => tool.execute({ file_path: 'ui.png' }, EXEC),
-    /PaddleOCR environment is missing.*scripts\/install\.py/
+    /no local OCR engine is installed.*scripts\/install\.py/
   );
 });
 
@@ -187,7 +206,7 @@ test('image_ocr tool: the schema no longer exposes an engine parameter', () => {
   assert.equal(tool.parameters.properties.engine, undefined);
   assert.ok(tool.parameters.properties.language, 'language stays, and selects the recognition model');
   assert.equal(tool.output.schema.properties.engine.type, 'string');
-  assert.ok(tool.output.schema.properties.lang, 'the resolved PaddleOCR language code is reported');
+  assert.ok(tool.output.schema.properties.lang, 'the resolved recognition-model key is reported');
 });
 
 test('ocrImage: recognizes English and Chinese text end to end', { skip: NEED_PADDLE }, async () => {
@@ -214,7 +233,7 @@ test('ocrImage: region crop restricts recognition', { skip: NEED_PADDLE }, async
   assert.ok(hit.lines.length > 0);
 });
 
-test('image_ocr tool: full pipeline through execute', { skip: NEED_PADDLE }, async () => {
+test('image_ocr tool: full pipeline through execute', { skip: NEED_RAPID }, async () => {
   ensureOcrTestImage();
   const { readFileSync } = await import('node:fs');
   const bytes = readFileSync(OUT);
@@ -223,20 +242,21 @@ test('image_ocr tool: full pipeline through execute', { skip: NEED_PADDLE }, asy
   const result = await tool.execute({ file_path: 'ui.png' }, EXEC);
   assert.equal(result.path, '/img/ui.png');
   assert.equal(result.region, 'full');
-  assert.equal(result.engine, 'paddle');
-  assert.equal(result.lang, PADDLE_DEFAULT_LANG);
+  assert.equal(result.engine, 'rapid');
+  // No language argument -> the auto pair, reported as the model keys it used.
+  assert.equal(result.lang, RAPID_AUTO_LANGS.join('+'));
   const allText = result.lines.map((l) => l.text).join(' ');
   assert.match(allText, /OCR/);
   assert.match(allText, /世/);
-  assert.ok(result.lines.every((l) => l.score !== undefined), 'paddle lines carry confidence scores');
+  assert.ok(result.lines.every((l) => l.score !== undefined), 'rapid lines carry confidence scores');
   assert.equal(emitted.length, 1);
   assert.equal(emitted[0][0], 'fs/observed');
   const rendered = tool.output.render({}, result).map((p) => p.text).join('\n');
   assert.match(rendered, /recognized \d+ line\(s\)/);
-  assert.match(rendered, /ocr: \/img\/ui\.png .*engine=paddle/);
+  assert.match(rendered, /ocr: \/img\/ui\.png .*engine=rapid/);
 });
 
-test('image_ocr tool: the configured OCR language is used when no argument is given', { skip: NEED_PADDLE }, async () => {
+test('image_ocr tool: the configured OCR language is used when no argument is given', { skip: NEED_RAPID }, async () => {
   ensureOcrTestImage();
   const { readFileSync } = await import('node:fs');
   const { ctx } = makeFakeCtx(readFileSync(OUT));
@@ -245,21 +265,23 @@ test('image_ocr tool: the configured OCR language is used when no argument is gi
   try {
     setRuntimeConfig({ mode: 'smart', ocr_language: 'ru' });
     const fromSettings = await tool.execute({ file_path: 'ui.png' }, EXEC);
-    assert.equal(fromSettings.lang, 'ru', 'the settings value must reach the recognition model');
+    // 'ru' selects the East Slavic model; the reported lang is the model key.
+    assert.equal(fromSettings.lang, 'eslav', 'the settings value must reach the recognition model');
 
-    const explicit = await tool.execute({ file_path: 'ui.png', language: 'en' }, EXEC);
-    assert.equal(explicit.lang, 'en', 'an explicit argument overrides the setting');
+    const explicit = await tool.execute({ file_path: 'ui.png', language: 'zh' }, EXEC);
+    assert.equal(explicit.lang, 'ch', 'an explicit argument overrides the setting');
   } finally {
     setRuntimeConfig({ mode: 'smart' });
   }
 });
 
-test('image_ocr tool: the language argument selects the reported model', { skip: NEED_PADDLE }, async () => {
+test('image_ocr tool: the language argument selects the reported model', { skip: NEED_RAPID }, async () => {
   ensureOcrTestImage();
   const { readFileSync } = await import('node:fs');
   const { ctx } = makeFakeCtx(readFileSync(OUT));
   const tool = createImageOcrTool(ctx);
-  const result = await tool.execute({ file_path: 'ui.png', language: 'en-US', focus: [1, 0, 5, 30] }, EXEC);
-  assert.equal(result.lang, 'en');
+  // A BCP-47 tag is resolved to the model key that actually runs.
+  const result = await tool.execute({ file_path: 'ui.png', language: 'ru-RU', focus: [1, 0, 5, 30] }, EXEC);
+  assert.equal(result.lang, 'eslav');
   assert.equal(result.region, 'focus [1,0,5,30]');
 });
