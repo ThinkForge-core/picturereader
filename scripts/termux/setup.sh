@@ -12,6 +12,18 @@
 #     `proot-distro` rootfs every dependency resolves to a prebuilt aarch64
 #     wheel and nothing is ever compiled.
 #
+# Both facts depend on the environments being built with the rootfs's *own*
+# interpreter. proot-distro deliberately keeps Termux's $PREFIX/bin last in the
+# guest PATH, so a rootfs that has no python3 of its own still answers
+# `command -v python3` -- with Termux's Bionic interpreter, whose pip rejects
+# every manylinux wheel and falls back to compiling from source. Every guest
+# command below therefore names an absolute /usr/bin path, and a venv whose base
+# prefix is not /usr is rebuilt instead of reused.
+#
+# The script works with proot-distro 4.x and 5.x: the rootfs is looked up in the
+# current `containers/<name>/rootfs` layout first, then in the older
+# `installed-rootfs/<name>` one.
+#
 # Two environments are created inside the rootfs:
 #
 #   media -> PyMuPDF + Pillow + OpenCV + piexif, used by document_to_image and
@@ -38,6 +50,12 @@
 #   bash scripts/termux/setup.sh --profile tui    # register in a profile other than "web"
 #   bash scripts/termux/setup.sh --skip-plugin    # environments only, no DSH registration
 #   bash scripts/termux/setup.sh --help
+#
+# Environment:
+#   PICREADER_DISTRO      proot-distro container to use (default: debian)
+#   PICREADER_PROFILE     DSH profile to register in (default: web)
+#   PICREADER_HEARTBEAT   seconds between "still running" lines (default: 15,
+#                         0 turns the ticker off)
 
 set -euo pipefail
 
@@ -57,7 +75,65 @@ else BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; OFF=""; fi
 step() { printf '\n%s▸ %s%s\n' "$BOLD" "$*" "$OFF"; }
 ok()   { printf '  %s✓%s %s\n' "$GREEN" "$OFF" "$*"; }
 warn() { printf '  %s!%s %s\n' "$YELLOW" "$OFF" "$*"; }
+note() { printf '    %s%s%s\n' "$DIM" "$*" "$OFF"; }
+fail() { printf '  %s✗%s %s\n' "$RED" "$OFF" "$*" >&2; }
 die()  { printf '\n%serror:%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
+
+SCRIPT_START=$(date +%s)
+HEARTBEAT_SECONDS="${PICREADER_HEARTBEAT:-15}"
+
+elapsed_human() {
+  local total="${1:-0}"
+  if [ "$total" -lt 60 ]; then printf '%ss' "$total"
+  else printf '%sm%02ss' $(( total / 60 )) $(( total % 60 ))
+  fi
+}
+
+has_tty() { [ -t 2 ]; }
+
+# Runs "$@" with its output wired straight to the terminal, so pip and apt keep
+# printing what they are doing instead of sitting behind --quiet; adds a
+# "still running" line on stderr every HEARTBEAT_SECONDS, because the long
+# steps here (a rootfs download, a wheel cache fill, a model fetch) are quiet
+# for minutes at a time; and ends with one verdict line carrying the elapsed
+# time. The child status is returned to the caller.
+#
+# PICREADER_HEARTBEAT=0 disables the ticker (useful for non-interactive logs).
+with_heartbeat() {
+  local label="$1"; shift
+  local start now rc=0 ticker=""
+  start=$(date +%s)
+  note "$label"
+  if has_tty && [ "$HEARTBEAT_SECONDS" -gt 0 ]; then
+    (
+      while :; do
+        sleep "$HEARTBEAT_SECONDS" || exit 0
+        now=$(date +%s)
+        printf '\r\033[K%s    · %s — still running, %s elapsed%s' \
+          "$DIM" "$label" "$(elapsed_human $(( now - start )))" "$OFF" >&2
+      done
+    ) &
+    ticker=$!
+  fi
+  "$@" || rc=$?
+  if [ -n "$ticker" ]; then
+    kill "$ticker" 2>/dev/null || true
+    wait "$ticker" 2>/dev/null || true
+    printf '\r\033[K' >&2
+  fi
+  now=$(date +%s)
+  if [ "$rc" = 0 ]; then
+    ok "$label — $(elapsed_human $(( now - start )))"
+  else
+    fail "$label — failed after $(elapsed_human $(( now - start ))) (exit $rc)"
+  fi
+  return "$rc"
+}
+
+# The pinned requirement names of a requirements file, for the log.
+req_pins() {
+  sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$1" | tr '\n' ' '
+}
 
 VERIFY_ONLY=0
 PROFILE="${PICREADER_PROFILE:-web}"
@@ -76,6 +152,11 @@ done
 [ -n "$PROFILE" ] || die "--profile must not be empty"
 
 printf '%spicturereader — Termux setup (level 3)%s\n' "$BOLD" "$OFF"
+if [ "$VERIFY_ONLY" = 0 ]; then
+  note "a first run downloads a Debian rootfs, on the order of 250 MiB of wheels and the OCR models;"
+  note "expect 10-30 minutes on a phone. Every long step reports what it is doing, shows the output"
+  note "of pip and apt, and ticks with its elapsed time (PICREADER_HEARTBEAT=0 silences the ticker)."
+fi
 
 # --------------------------------------------------------------------------
 # 0. are we where we think we are?
@@ -101,6 +182,16 @@ case "$(uname -m)" in
   aarch64) ok "architecture: aarch64" ;;
   *) warn "architecture is $(uname -m); this script targets aarch64 (aarch64 wheels exist for every dependency, others may differ)" ;;
 esac
+# A full run needs roughly 1.5 GB (rootfs ~350 MB + wheels + ONNX models), so
+# say up front how much room there is instead of dying halfway through.
+avail_kb="$(df -k "$PREFIX" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+case "$avail_kb" in
+  ''|*[!0-9]*) : ;;
+  *)
+    note "free space on $PREFIX: $(( avail_kb / 1024 )) MiB"
+    [ "$avail_kb" -lt 1500000 ] && warn "a full install needs ~1.5 GB; consider freeing space first"
+    ;;
+esac
 if [ -n "${DSH_OCR_PYTHON:-}" ] || [ -n "${DSH_MEDIA_PYTHON:-}" ]; then
   warn "DSH_OCR_PYTHON/DSH_MEDIA_PYTHON are already set and win over the state file — check they point where you expect"
 fi
@@ -122,15 +213,36 @@ command -v proot-distro >/dev/null 2>&1 || NEED_PKGS="proot-distro"
 command -v python3      >/dev/null 2>&1 || NEED_PKGS="${NEED_PKGS:+$NEED_PKGS }python3"
 if [ -n "$NEED_PKGS" ]; then
   [ "$VERIFY_ONLY" = 1 ] && die "missing from Termux: $NEED_PKGS (install with: pkg install -y $NEED_PKGS)"
-  pkg install -y $NEED_PKGS
+  note "installing into Termux first: $NEED_PKGS"
+  with_heartbeat "pkg install -y $NEED_PKGS" pkg install -y $NEED_PKGS \
+    || die "pkg install -y $NEED_PKGS failed (see its output above)"
 fi
 ok "proot-distro: $(proot-distro --version 2>/dev/null || echo present)"
 
-if [ ! -d "$PREFIX/var/lib/proot-distro/installed-rootfs/$DISTRO" ]; then
+# proot-distro 5.x stores containers as `containers/<name>/rootfs`; releases up
+# to 4.x used `installed-rootfs/<name>`. Probe both, newest first, so an
+# existing rootfs is never mistaken for a missing one (and `install` re-run).
+find_rootfs() {
+  local candidate
+  for candidate in \
+    "$PREFIX/var/lib/proot-distro/containers/$DISTRO/rootfs" \
+    "$PREFIX/var/lib/proot-distro/installed-rootfs/$DISTRO"
+  do
+    if [ -d "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+ROOTFS_DIR="$(find_rootfs || true)"
+if [ -z "$ROOTFS_DIR" ]; then
   [ "$VERIFY_ONLY" = 1 ] && die "the $DISTRO rootfs is not installed"
-  proot-distro install "$DISTRO"
+  note "one-time download: the rootfs layer is ~50 MiB, and unpacking it takes a few minutes on a phone"
+  with_heartbeat "proot-distro install $DISTRO" proot-distro install "$DISTRO" \
+    || die "proot-distro install $DISTRO failed (see its output above)"
+  ROOTFS_DIR="$(find_rootfs || true)"
+  [ -n "$ROOTFS_DIR" ] || die "proot-distro install $DISTRO finished without a rootfs"
 fi
-ok "rootfs: $PREFIX/var/lib/proot-distro/installed-rootfs/$DISTRO"
+ok "rootfs: $ROOTFS_DIR"
 
 # `--shared-tmp` binds the Termux temp dir to /tmp inside the guest. Newer
 # proot-distro releases have it, older ones do not, so probe rather than assume.
@@ -149,22 +261,36 @@ in_guest() {
 # 2. the guest interpreter
 # --------------------------------------------------------------------------
 step "Installing the Python interpreter inside $DISTRO"
+# `command -v python3` is not a valid test inside the guest: proot-distro appends
+# Termux's $PREFIX/bin to the guest PATH, so the question is answered by Termux's
+# python3 whenever the rootfs has none of its own. That interpreter is Bionic,
+# pip refuses every manylinux wheel for it and compiles from source. Ask for the
+# guest's file by absolute path instead, and install it when it is missing.
 if [ "$VERIFY_ONLY" = 0 ]; then
-  in_guest env DEBIAN_FRONTEND=noninteractive bash -c '
-    set -e
-    need=0
-    command -v python3 >/dev/null 2>&1 || need=1
-    python3 -m venv --help >/dev/null 2>&1 || need=1
-    if [ "$need" = 1 ]; then
-      apt-get update -qq
-      apt-get install -y -qq --no-install-recommends \
-        python3 python3-venv python3-pip libgomp1 ca-certificates
-    fi
-  '
+  GUEST_PY_READY=0
+  if in_guest /bin/sh -c 'test -x /usr/bin/python3 && /usr/bin/python3 -m venv --help >/dev/null 2>&1' 2>/dev/null; then
+    GUEST_PY_READY=1
+    ok "python3 is already present inside $DISTRO"
+  fi
+  if [ "$GUEST_PY_READY" = 0 ]; then
+    note "apt-get update, then python3 + python3-venv + python3-pip + libgomp1 + ca-certificates (~40 MiB)"
+    note "Debian 13 ships Python 3.13, and every pinned dependency has a cp313 aarch64 wheel"
+    with_heartbeat "apt-get install python3 inside $DISTRO" \
+      in_guest /bin/sh -c '/usr/bin/apt-get update -q &&
+        DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y \
+          -o Dpkg::Progress-Fancy=0 -o Dpkg::Use-Pty=0 \
+          --no-install-recommends python3 python3-venv python3-pip libgomp1 ca-certificates' \
+      || die "installing python3 inside $DISTRO failed (see the apt output above)"
+  fi
 fi
-GUEST_PY="$(in_guest python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)"
-[ -n "$GUEST_PY" ] || die "python3 is not available inside $DISTRO"
-ok "guest python: $GUEST_PY"
+GUEST_PY="$(in_guest /usr/bin/python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)"
+[ -n "$GUEST_PY" ] || die "python3 is not available at /usr/bin/python3 inside $DISTRO"
+GUEST_PY_PREFIX="$(in_guest /usr/bin/python3 -c 'import sys; print(sys.base_prefix)' 2>/dev/null || true)"
+case "$GUEST_PY_PREFIX" in
+  /usr) ok "guest python: $GUEST_PY" ;;
+  "")   die "could not query the interpreter at /usr/bin/python3 inside $DISTRO" ;;
+  *)    die "/usr/bin/python3 inside $DISTRO is backed by $GUEST_PY_PREFIX, not the rootfs; refusing to build environments on Termux's interpreter" ;;
+esac
 
 # --------------------------------------------------------------------------
 # 3. the environments
@@ -174,14 +300,36 @@ build_venv() {
   local venv="$ROOT_VENVS/$role"
   step "Installing the '$role' environment"
   if [ "$VERIFY_ONLY" = 0 ]; then
-    in_guest bash -c "
-      set -e
-      if [ ! -x '$venv/bin/python' ]; then python3 -m venv '$venv'; fi
-      '$venv/bin/python' -m pip install --quiet --upgrade pip
-      '$venv/bin/python' -m pip install --quiet --progress-bar on --disable-pip-version-check --no-input -r '$req'
-    "
+    note "requirements: $(req_pins "$req")"
+    note "pip downloads the aarch64 wheels first; the ticker keeps reporting while it is quiet"
+    # Arguments are passed positionally rather than interpolated into the guest
+    # script, so a path with a space survives the trip through `shlex.join`.
+    # A venv left behind by an earlier run may be based on Termux's interpreter
+    # (see step 2); pip cannot install manylinux wheels there, so such a venv is
+    # removed and rebuilt instead of being reused. The interpreter that creates
+    # it is named absolutely for the same reason. pip output is deliberately not
+    # silenced: this is the longest step and the one that used to fail blind.
+    with_heartbeat "$role: venv + pip install" \
+      in_guest /bin/bash -c '
+        set -e
+        venv="$1"; req="$2"
+        if [ -f "$venv/pyvenv.cfg" ] && \
+           ! "$venv/bin/python" -c "import sys; raise SystemExit(0 if sys.base_prefix == \"/usr\" else 7)" 2>/dev/null; then
+          echo "  removing $venv: it was not built on the guest interpreter"
+          rm -rf "$venv"
+        fi
+        if [ ! -x "$venv/bin/python" ]; then
+          echo "  creating the virtual environment at $venv"
+          /usr/bin/python3 -m venv "$venv"
+        fi
+        "$venv/bin/python" -m pip install --upgrade pip \
+          --progress-bar on --disable-pip-version-check --no-input
+        "$venv/bin/python" -m pip install -r "$req" \
+          --progress-bar on --disable-pip-version-check --no-input
+      ' _ "$venv" "$req" \
+      || die "the '$role' environment failed to install — pip said why in the output above"
   fi
-  if in_guest "$venv/bin/python" -c 'print("ok")' >/dev/null 2>&1; then
+  if in_guest "$venv/bin/python" -c 'import sys; raise SystemExit(0 if sys.base_prefix == "/usr" else 7)' >/dev/null 2>&1; then
     ok "$role -> $venv"
   else
     die "the '$role' environment is not usable — re-run without --verify"
@@ -196,8 +344,11 @@ build_venv media "$REQ_DIR/media.txt"
 # which the minimal rootfs does not have.
 build_venv ocr "$REQ_DIR/ocr.txt"
 if [ "$VERIFY_ONLY" = 0 ]; then
-  in_guest "$ROOT_VENVS/ocr/bin/python" -m pip install --quiet --progress-bar on \
-    --disable-pip-version-check --no-input --no-deps "$RAPIDOCR_PIN"
+  note "adding $RAPIDOCR_PIN with --no-deps (its opencv_python pin would pull the GUI build)"
+  with_heartbeat "ocr: installing $RAPIDOCR_PIN" \
+    in_guest "$ROOT_VENVS/ocr/bin/python" -m pip install \
+      --progress-bar on --disable-pip-version-check --no-input --no-deps "$RAPIDOCR_PIN" \
+    || die "installing $RAPIDOCR_PIN failed (see the pip output above)"
 fi
 
 step "Checking the OCR environment"
@@ -214,8 +365,13 @@ fi
 step "Downloading the OCR models"
 if [ "$VERIFY_ONLY" = 0 ]; then
   # `--probe` builds the same two engines a real call uses (Chinese/English and
-  # East Slavic), which is what pulls both model sets into the cache.
-  if in_guest "$ROOT_VENVS/ocr/bin/python" "$SCRIPT_DIR/../ocr.py" --probe 2>/dev/null | grep -q .; then
+  # East Slavic), which is what pulls both model sets into the cache. Its stdout
+  # is the base64 payload meant for the plugin, so it is discarded here.
+  note "first run only: the detector and both recognition models are fetched now"
+  if with_heartbeat "ocr warm-up (model download)" \
+       in_guest /bin/sh -c '"$0" "$1" --probe >/dev/null' \
+         "$ROOT_VENVS/ocr/bin/python" "$SCRIPT_DIR/../ocr.py"
+  then
     ok "models are in place"
   else
     warn "the warm-up run failed; the environment itself is fine — the first image_ocr call will retry"
@@ -305,7 +461,8 @@ elif [ ! -d "$PROFILE_DIR" ]; then
   # has to exist first. Booting DSH once creates it.
   warn "the '$PROFILE' profile does not exist yet — boot DSH once, then run:"
   register_hint
-elif "$DSH_BIN" plugin --profile "$PROFILE" add "$REPO_ROOT"; then
+elif with_heartbeat "dsh plugin --profile $PROFILE add $REPO_ROOT" \
+       "$DSH_BIN" plugin --profile "$PROFILE" add "$REPO_ROOT"; then
   ok "plugin registered in the '$PROFILE' profile"
 else
   warn "dsh plugin did not complete — register it manually with:"
@@ -315,10 +472,11 @@ fi
 # --------------------------------------------------------------------------
 # summary
 # --------------------------------------------------------------------------
+TOTAL_SECONDS=$(( $(date +%s) - SCRIPT_START ))
 if [ "$VERIFY_ONLY" = 1 ]; then
-  printf '\n%s%s✓ verification finished%s\n' "$BOLD" "$GREEN" "$OFF"
+  printf '\n%s%s✓ verification finished in %s%s\n' "$BOLD" "$GREEN" "$(elapsed_human $TOTAL_SECONDS)" "$OFF"
 else
-  printf '\n%s%s✓ done%s\n' "$BOLD" "$GREEN" "$OFF"
+  printf '\n%s%s✓ done in %s%s\n' "$BOLD" "$GREEN" "$(elapsed_human $TOTAL_SECONDS)" "$OFF"
 fi
 cat <<EOF
 

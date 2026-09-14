@@ -355,6 +355,23 @@ JavaScript and no test differs between them.
    `bash scripts/termux/setup.sh --help` lists the flags (`--verify`,
    `--profile <name>`, `--skip-plugin`).
 
+   Nothing on a phone should look like a hang: every long step prints what it is
+   about to do, the output of `pip`/`apt`/`proot-distro` is left visible rather
+   than silenced, and an elapsed-time line is redrawn every 15 seconds while a
+   step is quiet:
+
+   ```
+   ▸ Installing the 'media' environment
+       requirements: pymupdf==1.28.2 Pillow==12.3.0 opencv-python-headless==5.0.0.93 piexif==1.1.3
+       media: venv + pip install
+       · media: venv + pip install — still running, 45s elapsed
+     ✓ media: venv + pip install — 1m12s
+     ✓ media -> /opt/picturereader/media
+   ```
+
+   `PICREADER_HEARTBEAT=0` silences the ticker; `PICREADER_DISTRO` and
+   `PICREADER_PROFILE` override the defaults (`debian`, `web`).
+
 3. **Export the interpreters** (recommended on a device). Add to `~/.bashrc`:
 
    ```sh
