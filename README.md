@@ -1,7 +1,7 @@
 # picturereader
 
 > **v3.3.2 · Linux-only** — full "see images / read documents / edit photos" capability for text-only LLMs such as DeepSeek.
-> It combines a **visual twin adapter** (wraps any text-only model in place so DSH treats it as image-capable → native thumbnails plus automatic image analysis), **three-mode routing** (privacy / smart / strict), a **local pixel-level toolchain** (scan / PaddleOCR / crop / palette / compare / batch), **document to image** (pdf / word / excel / ppt), a **local image editor `image_edit`** (Pillow + OpenCV, pure CPU: resize / rotate / filters / composite / watermark / background removal / upscale and more) and an **optional external VLM bridge**. One plugin, the whole chain.
+> It combines a **visual twin adapter** (wraps any text-only model in place so DSH treats it as image-capable → native thumbnails plus automatic image analysis), **three-mode routing** (privacy / smart / strict), a **local pixel-level toolchain** (scan / RapidOCR / crop / palette / compare / batch), **document to image** (pdf / word / excel / ppt), a **local image editor `image_edit`** (Pillow + OpenCV, pure CPU: resize / rotate / filters / composite / watermark / background removal / upscale and more) and an **optional external VLM bridge**. One plugin, the whole chain.
 
 [![dsh-plugin](https://awesome-dsh-plugin.com/badge.svg)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) [![dsh.so security](https://www.dsh.so/badge/picturereader.svg)](https://www.dsh.so/artifact/picturereader) [![dsh.so install](https://www.dsh.so/badge/install/picturereader.svg)](https://www.dsh.so/artifact/picturereader)
 
@@ -45,7 +45,7 @@ image arrives → twin stream interception / tool call
               → read the current "mode" → get that mode's routing policy
               → model / tool picks a route:
                    local pixel analysis (image_scan / image_sample)
-                   local text recognition (image_ocr → PaddleOCR)
+                   local text recognition (image_ocr → RapidOCR)
                    external semantic understanding (vision_analyze include_vlm=true → VLM)
                    cross-validation (compare evidence from several routes)
 ```
@@ -91,7 +91,7 @@ The three modes constrain not only `vision_analyze` but also the `stream` interc
 | Tool | Purpose |
 |---|---|
 | `image_scan` | Whole-image or regional scan: color grid + region blobs + shade diversity + texture + structure + hue families; supports `focus` / `region` / `px_per_cell` for targeted zoom. |
-| `image_ocr` | Text recognition through **PaddleOCR**, with an optional `language` BCP-47 tag selecting the recognition model (the default covers Chinese, English and Japanese — see the OCR languages table above). |
+| `image_ocr` | Text recognition through **RapidOCR** (ONNX Runtime), with an optional `language` BCP-47 tag or model key selecting the recognition model. By default every line is read with **both** bundled models — Chinese/English and East Slavic/Cyrillic — and the higher-scoring reading wins (see the OCR languages table below). |
 | `image_sample` | N×N exact pixel sampling to judge material and texture. |
 | `image_crop` | Crop by `region` and write out a PNG. |
 | `image_palette` | Color extraction: dominant color list (hex + palette name + share) plus hue families. |
@@ -101,21 +101,25 @@ The three modes constrain not only `vision_analyze` but also the `stream` interc
 | `document_to_image` | Render documents (pdf / word / excel / ppt) page by page to PNG for per-page OCR and scan analysis. |
 | `image_edit` | Local image editing and batch processing with 22 CPU-only actions. |
 
-> **OCR note**: PaddleOCR is the only OCR engine picturereader ships, so its Python environment is required for `image_ocr` (`--skip-ocr` during installation leaves it out). A missing environment yields a clear "run the installer" hint instead of a raw error.
+> **OCR note**: `image_ocr` runs on **RapidOCR** (ONNX Runtime). That is the engine the installer creates (`--engine ocr`, the default) and the only one that installs on every platform, aarch64/Termux included. Its Python environment is therefore required for `image_ocr` (`--skip-ocr` during installation leaves it out). A missing environment yields a clear "run the installer" hint instead of a raw error. The **legacy PaddleOCR** environment (`--engine paddle`) still works and is still detected at runtime, so an older installation keeps working — but it is not what a fresh install produces, and it has no aarch64 wheel.
 
-> **OCR languages matter.** The recognition model is chosen by language. The default model reads **Chinese, English and Japanese**; text written in another script needs its own language, otherwise the result is nonsense rather than an error. Set it once in the settings card (**OCR default language**, advanced) or per call with the `language` argument:
+> **OCR languages matter.** The recognition model is chosen by language, and a wrong model returns confident nonsense rather than an error. By default `image_ocr` reads every line with **two** models at once — Chinese/English (`ch`) and East Slavic/Cyrillic (`eslav`) — and keeps the higher-scoring reading, so Russian, English and Chinese can be mixed in one image without declaring anything. Forcing a single model is faster and is the right thing when the script is known. Set it once in the settings card (**OCR default language**, advanced) or per call with the `language` argument; both a BCP-47 tag and a model key are accepted:
 
-| Text you need to read | Set `ocr_language` / `language` to |
+| Text you need to read | `language` / `ocr_language` |
 |---|---|
-| English, Chinese, Japanese | *(leave empty — this is the default model)* |
-| Russian, Ukrainian, Belarusian | `ru` / `uk` / `be` |
-| Other Cyrillic (Bulgarian, Serbian, Kazakh, …) | `bg`, `sr`, `mk`, `kk`, … |
-| German, French, Spanish, Polish, Turkish, Vietnamese, … | the language code itself, e.g. `de`, `fr`, `es`, `pl`, `tr`, `vi` |
-| Arabic, Persian, Urdu | `ar`, `fa`, `ur` |
-| Hindi, Marathi, Nepali | `hi`, `mr`, `ne` |
-| Thai, Greek, Tamil, Telugu, Georgian | `th`, `el`, `ta`, `te`, `ka` |
+| Mixed scripts, or unknown | *(leave empty — both bundled models, the default)* |
+| Chinese (Simplified) + English + digits | `ch` (or `zh`, `zh-Hans`) |
+| Russian, Ukrainian, Belarusian | `eslav` (or `ru`, `uk`, `be`) |
+| Other Cyrillic (Bulgarian, Serbian, Kazakh, …) | `cyrillic` (or `bg`, `sr`, `kk`, …) |
+| Latin-script European (German, French, Spanish, Polish, Turkish, Vietnamese, …) | `latin` (or `de`, `fr`, `es`, `pl`, `tr`, `vi`, …) |
+| Japanese | `japan` (`ja`) |
+| Traditional Chinese | `chinese_cht` |
+| Korean, Thai, Greek, Georgian | `korean` (`ko`), `th`, `el`, `ka` |
+| Arabic, Persian, Urdu | `arabic` (`ar`, `fa`, `ur`) |
+| Hindi, Marathi, Nepali | `devanagari` (`hi`, `mr`, `ne`) |
+| Tamil, Telugu | `ta`, `te` |
 
-The model for a newly requested language is downloaded on first use (into `~/.paddlex-cache`). The `language` argument of a call always overrides the setting.
+`ch` and `eslav` ship with the environment — the installer warms them up, so they work offline immediately. Every other model is downloaded on first use into the environment's own model cache. The `language` argument of a call always overrides the setting.
 
 ### 4. Document to image — `document_to_image`
 
@@ -147,13 +151,13 @@ A single tool dispatching many actions, backed by the installer-managed `media` 
 | Tool | Summary |
 |---|---|
 | `image_scan` | Coarse pixel grid (luminance and/or color), connected color regions, shade diversity, texture density, structural hints (stripes, symmetry, gradients), true color shares and hue families. Zoom with `focus` (grid coordinates from a previous scan), `region` (0..1 fractions) or `px_per_cell` (source pixels per cell). |
-| `image_ocr` | PaddleOCR text recognition over the whole image or a `region` / `focus`, returning each line with its pixel bounding box and confidence. Optional `language` BCP-47 tag (`ru`, `en-US`, `zh-Hans`, `de`, …) selecting the recognition model; it falls back to the configured `ocr_language`, then to the default model. |
+| `image_ocr` | RapidOCR text recognition over the whole image or a `region` / `focus`, returning each line with its pixel bounding box and confidence. Optional `language` BCP-47 tag or model key (`ru`, `en-US`, `zh-Hans`, `eslav`, `de`, …) selecting the recognition model; it falls back to the configured `ocr_language`, then to the two-model default. |
 | `image_sample` | Exact N×N pixels of a small region plus a local-contrast statistic, for material and texture judgement. |
 | `image_crop` | Crop to a fraction region and write a lossless PNG, ready for a follow-up `image_scan` / `image_ocr`. |
 | `image_palette` | Dominant colors plus a hue-family breakdown for an overall tone read. |
 | `image_compare` | Pixel-by-pixel comparison of two images or two regions, optionally restricted to the same fraction region, with a diff preview PNG. |
 | `image_batch` | Triage a batch of images: type guess, text density, OCR excerpt and a deepening recommendation for each, in one compact manifest. |
-| `vision_analyze` | One call that runs the low-information guard and returns `scan` / `ocr` / `vlm` evidence blocks; `ocr_language` selects the PaddleOCR recognition model for the OCR block. |
+| `vision_analyze` | One call that runs the low-information guard and returns `scan` / `ocr` / `vlm` evidence blocks; `ocr_language` selects the RapidOCR recognition model for the OCR block. |
 | `document_to_image` | Page-by-page document rendering to PNG (see above). |
 | `image_edit` | 22 local editing actions (see below). |
 
@@ -215,9 +219,9 @@ Runs in the same shared `media` environment as `image_edit` (PyMuPDF, Pillow, Op
 ### Requirements
 
 - **Linux** (this release targets Linux only).
-- **Termux / Android** is *not* installed with the script below: it needs a `proot-distro` Debian rootfs, because Termux is Bionic libc and PyPI's manylinux wheels do not apply there. It therefore lives on the separate [`termux` branch](https://github.com/ThinkForge-core/picturereader/tree/termux) with its own bootstrap (`scripts/termux/setup.sh`). Everything on this branch describes the `linux` build.
+- **Termux / Android**: *not* installed with the script below, under any flag. A device needs a `proot-distro` Debian rootfs — Termux is Bionic libc, so PyPI's manylinux wheels do not apply there and the environments would have to be compiled from source. The device therefore runs a separate [`termux` branch](https://github.com/ThinkForge-core/picturereader/tree/termux) with its own bootstrap; **start from that branch's README, not this one.** The branch model itself is described under [Development](#development).
 - **Node.js** `^22.19` or `>=24` for DSH itself (per `engines` in `package.json`).
-- **Python 3** to run the installer scripts. The PaddleOCR environment additionally needs an interpreter of **version 3.13 or older**, because `paddlepaddle` publishes no cp314 wheels.
+- **Python 3** to run the installer scripts. The default RapidOCR environment needs nothing beyond that; only the **legacy** PaddleOCR environment (`--engine paddle`) additionally needs an interpreter of **version 3.13 or older**, because `paddlepaddle` publishes no cp314 wheels.
 - **LibreOffice** (headless `soffice`) only if you want `document_to_image` to handle Office formats; it is auto-detected on `PATH` and in the usual Linux install locations.
 
 ### Install
@@ -463,7 +467,7 @@ The card follows the settings-panel design language (grouped cards / pill button
 | `scan_default_size` | `32` | Default `image_scan` grid size. |
 | `scan_palette` | `auto` | Default `image_scan` palette (auto/full/basic/gray). |
 | `scan_mode` | `auto` | Default `image_scan` mode (auto/ascii/color). |
-| `ocr_language` | empty | Default OCR language as a BCP-47 tag (e.g. `ru`, `en-US`, `zh-Hans`), which selects the PaddleOCR recognition model. Leave empty for the default model (Chinese / English / Japanese); see the OCR languages table above. |
+| `ocr_language` | empty | Default OCR language, as a BCP-47 tag (e.g. `ru`, `en-US`, `zh-Hans`) or a RapidOCR model key (e.g. `eslav`, `cyrillic`, `latin`), selecting the recognition model. Leave empty for the two-model default (Chinese/English + East Slavic); see the OCR languages table above. |
 | `multimodal_models` | empty | Multimodal allowlist (comma separated): these models receive images directly without degradation. |
 | `request_guard` | `true` | Request guard — last-resort image block degradation on llm/stream. |
 | `batch_probe_first` | `3` | How many leading images `image_batch` probes to decide whether a batch is text-dense. |
@@ -482,8 +486,10 @@ Every variable below overrides the corresponding value from the installer state 
 |---|---|---|
 | `DSH_HOME` | `~/.dsh` | Root of the DSH state directory; the installer state file and the default venv prefix live under it. |
 | `DSH_MEDIA_PYTHON` | `~/.dsh/picturereader/venvs/media/bin/python` | Interpreter of the shared **media** environment, used by **both** `document_to_image` and `image_edit`. |
-| `DSH_PADDLE_PYTHON` | `~/.dsh/picturereader/venvs/paddle/bin/python` | Interpreter of the PaddleOCR environment used by `image_ocr`. |
-| `DSH_PADDLE_CACHE` | `~/.paddlex-cache` | PaddleX model cache directory. |
+| `DSH_OCR_PYTHON` | `~/.dsh/picturereader/venvs/ocr/bin/python` | Interpreter of the **RapidOCR** environment used by `image_ocr`. This is the environment the installer creates; on a Termux device it is the wrapper `scripts/termux/setup.sh` generates. |
+| `DSH_OCR_THREADS` | unset (ONNX Runtime's own default) | Cap on the ONNX Runtime thread pool for one OCR run. Worth setting to `2` on a phone or a small VM: without it ONNX Runtime keeps every core busy for the whole run, which heats the device and drains the battery. An empty or non-numeric value is ignored. |
+| `DSH_PADDLE_PYTHON` | `~/.dsh/picturereader/venvs/paddle/bin/python` | Interpreter of the **legacy** PaddleOCR environment. Consulted only when no RapidOCR interpreter exists (`ocrEngine()` tries `ocrPython()` first, then this one). |
+| `DSH_PADDLE_CACHE` | `~/.paddlex-cache` | PaddleX model cache directory (legacy PaddleOCR engine only). |
 | `DSH_SOFFICE` | auto-detected (`/usr/bin/soffice`, `/usr/bin/libreoffice`, `/usr/local/bin/soffice`, …) | LibreOffice headless executable used by `document_to_image`. |
 | `DSH_REALESRGAN_EXE` | `realesrgan-ncnn-vulkan` | Path to the super-resolution CLI used by `image_edit`'s `upscale` (Vulkan). |
 
@@ -526,7 +532,7 @@ await main()
 Compared with the common alternatives (`dsh-tool-vision`, `dsh-image-paste`, `dsh-vision-bridge`, …):
 
 1. **Not tied to one vendor**: the visual twin works for any provider (including pi-ai based ones such as `opencode-go`, xiaomi and qiu), not just one API.
-2. **The whole chain can run offline**: privacy mode makes zero outbound calls, with pure-JS local pixel tools and PaddleOCR, no cloud dependency.
+2. **The whole chain can run offline**: privacy mode makes zero outbound calls, with pure-JS local pixel tools and RapidOCR on ONNX Runtime, no cloud dependency.
 3. **Complete toolchain**: cropping, color extraction, comparison, batching, document conversion and **local editing with image_edit** — all in one plugin.
 4. **Native thumbnails**: real DSH image blocks (via `inputModalities`), not a text-path imitation.
 5. **Fast**: local tools answer in milliseconds, and VLM calls are controlled (low-information guard plus the smart mode's "only when worth it"), saving turns and time.
@@ -562,16 +568,16 @@ If dragging and dropping an image does not work, check the following:
 - **WebP is not supported**: `image_scan` / `vision_analyze` and friends report an error for WebP, so convert to PNG or JPEG first; `image_edit`'s `convert` action can turn WebP into PNG or JPEG.
 - **Some `image_edit` actions need optional dependencies**: `remove_background` (rembg) and `raw_convert` (rawpy) come from `--with-optional`, and `upscale` needs the external realesrgan CLI; when one is missing the tool returns an installation hint instead of crashing.
 - **rembg downloads the U²-Net model on first run**: roughly 35–176 MB, cached in `~/.u2net` and usable offline afterwards.
-- **PaddleOCR downloads its models on first use**: cached in `~/.paddlex-cache` (the installer warms this up). Multi-source fallback is used, and noisy download lines are filtered so the first call does not fail.
+- **OCR models other than the two bundled ones are downloaded on first use**: `ch` and `eslav` ship with the environment, but naming any other language pulls its model on the first call and needs a network. Multi-source fallback is used, and noisy download lines are filtered so the first call does not fail.
 - **Vision bridge model changes need a DSH restart** (`vision_models` is not hot-reloaded).
 - **`dsh-file-drop` should be disabled**: its "drop an image and inject text" behaviour can conflict with the visual twin and the image bridge (duplicate or competing injection). Native thumbnails plus automatic image bridge analysis already cover that need.
 - **The external VLM needs a network and an endpoint**: with no endpoint configured, or while offline, the call is skipped with a clear message; privacy mode never calls out at all.
-- **The PaddleOCR environment needs Python 3.13 or older**: `paddlepaddle` publishes no cp314 wheels, so installation fails on a 3.14 interpreter.
+- **The legacy PaddleOCR environment needs Python 3.13 or older**: `paddlepaddle` publishes no cp314 wheels, so installing it with `--engine paddle` fails on a 3.14 interpreter. The default RapidOCR environment has no such limit.
 
 ## Development
 
 ```sh
-# Repository main branch (the DSH build; sources live at the repository root)
+# The "linux" branch — the primary line; sources live at the repository root
 npm install
 npm test                              # node:test
 python3 scripts/install.py --verify    # check the local installation
@@ -582,15 +588,24 @@ node scripts/preview.mjs               # generate fixtures and preview the rende
 
 - **Hot plugging**: the business logic is concentrated in `src/core.js`, plus the installer-aware path resolution in `src/paths.js`; tools are reloaded dynamically by mtime on each execution. Tool definitions (schemas and descriptions) and settings-card changes require restarting the host.
 - **Repository layout**: `src/` holds the plugin sources, `scripts/` the Python backends (`doc-to-image.py`, `image-edit.py`) and the install/uninstall entry points, `skills/` the bundled image-reading skill, `tests/` the `node:test` suites, and `client.js` the Web settings card.
-- **ZCode build**: lives on the [zcode branch](https://github.com/jing-hy/picturereader/tree/zcode) of this repository (sources under `zcode/`), exposes the tools through an MCP server and is installed with `npm install picturereader-zcode`. Both builds share `src/core.js` and the image-reading skill.
-- **Termux / Android build**: lives on the [termux branch](https://github.com/ThinkForge-core/picturereader/tree/termux) of this repository. It is exactly this `linux` line plus one commit that adds `scripts/termux/setup.sh` and the "Termux / Android" README section — no JavaScript differs between the two branches, so a fix lands on `linux` once and reaches the device with `git merge linux` (no source conflicts by construction).
+- **ZCode build**: lives on the [zcode branch](https://github.com/ThinkForge-core/picturereader/tree/zcode) of this repository (sources under `zcode/`), exposes the tools through an MCP server and is installed with `npm install picturereader-zcode`. Both builds share `src/core.js` and the image-reading skill.
 
-  ```sh
-  git clone -b termux https://github.com/ThinkForge-core/picturereader.git   # Termux / Android
-  git clone https://github.com/ThinkForge-core/picturereader.git            # Linux (default branch)
-  ```
+### Two branches, and which one to clone
 
-  Because the branches share all their code and their tests, Termux behaviour is verified on `linux` with `PREFIX=/data/data/com.termux/files/usr npm test`.
+`linux` is the primary line: all the shared code, the installer, the OCR engine, the capability profile and the tests. `termux` is **exactly `linux` plus one commit** that adds `scripts/termux/setup.sh` and the "Termux / Android" README section — **no JavaScript and no test differs between the two branches**. A fix therefore lands on `linux` once and reaches the device with a merge, and the test result is identical on both.
+
+```sh
+git clone https://github.com/ThinkForge-core/picturereader.git             # Linux — this is the default branch
+git clone -b termux https://github.com/ThinkForge-core/picturereader.git   # Termux / Android
+```
+
+If you are installing on a phone or tablet, **do not run `scripts/install.py` from this branch in Termux**: it cannot build the Python environments there. Clone the `termux` branch and follow its README, which drives `scripts/termux/setup.sh` instead. `install.py --verify` remains safe and useful on a device as a read-only check, and it is the last step the Termux bootstrap tells you to run.
+
+Because the branches share all their code and their tests, Termux behaviour is verified on `linux` with the environment variable Termux itself sets:
+
+```sh
+PREFIX=/data/data/com.termux/files/usr npm test
+```
 
 ## License
 
