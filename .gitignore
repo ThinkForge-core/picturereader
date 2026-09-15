@@ -1,4 +1,7 @@
-node_modules/
+# Matches a directory *and* a symlink of this name: the usual `node_modules/`
+# only covers the directory, so a checkout whose node_modules is a link to
+# somewhere else would get committed, target path and all.
+node_modules
 tests/fixtures-out/
 .paddlex-cache/
 .codex_tmp/
