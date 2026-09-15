@@ -1378,13 +1378,21 @@ export function runPaddleOcr(pngPath, { language } = {}) {
 }
 
 /**
- * Full OCR pipeline: decode -> optional region crop -> PNG temp file ->
- * PaddleOCR -> cleanup. Returns recognized text lines with pixel boxes.
+ * Full OCR pipeline over raw bytes: decode -> optional region crop -> PNG temp
+ * file -> whichever engine is installed -> cleanup. Returns recognized text
+ * lines with pixel boxes.
+ *
+ * The engine is resolved through {@link ocrEngine}, exactly like
+ * {@link ocrFile}: a hardcoded PaddleOCR call here meant that on an install
+ * with only the RapidOCR environment (which is what the installer provisions)
+ * every caller of this buffer-level pipeline — `image_batch`'s text probe and
+ * `vision_analyze`'s OCR evidence — failed with "PaddleOCR interpreter not
+ * found" while a working engine sat right there.
  *
  * @param buffer - raw image bytes.
  * @param ext - lowercase extension ('.png' etc.).
  * @param options - `{ region, language }`.
- * @returns `{ width, height, lines }`.
+ * @returns `{ engine, width, height, lines }`.
  */
 export async function ocrImage(buffer, ext, { region, language } = {}) {
   const image = decodeImage(buffer, ext);
@@ -1397,8 +1405,23 @@ export async function ocrImage(buffer, ext, { region, language } = {}) {
   const tmpPath = join(tmpdir(), `picturereader-ocr-${randomBytes(6).toString('hex')}.png`);
   await writeFile(tmpPath, pngBytes);
   try {
-    const result = await runPaddleOcr(tmpPath, { language });
-    return { width: work.width, height: work.height, lines: result.lines };
+    const { engine, python } = await ocrEngine();
+    if (engine === 'rapid') {
+      // The region was already applied in JavaScript above, so the runner gets
+      // a plain PNG and must not crop a second time.
+      const result = await runRapidOcrFile(tmpPath, {
+        ...(language !== undefined ? { language } : {}),
+        python
+      });
+      return { engine: 'rapid', width: work.width, height: work.height, lines: result.lines };
+    }
+    if (engine === 'paddle') {
+      const result = await runPaddleOcr(tmpPath, { language });
+      return { engine: 'paddle', width: work.width, height: work.height, lines: result.lines };
+    }
+    throw new Error(
+      `image_ocr: no local OCR engine is installed (expected interpreter: ${ocrPython()}) — ${installHint()}`
+    );
   } finally {
     await rm(tmpPath, { force: true }).catch(() => {});
   }

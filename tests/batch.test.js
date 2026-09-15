@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createImageBatchTool, classifyType } from '../src/image-batch.js';
 import { decodeImage } from '../src/core.js';
 import {
@@ -276,4 +279,45 @@ test('image_batch: the ocrImage seam still overrides the real pipeline', async (
   const result = await tool.execute({ file_paths: ['a.png'], auto_ocr: 'always' }, EXEC);
   assert.equal(calls.length, 1, 'the injected OCR stand-in must be used');
   assert.equal(result.items[0].type, 'text');
+});
+
+test('image_batch: the real pipeline detects text on a RapidOCR-only install', async () => {
+  // The seam above hides the engine choice completely, which is how a hardcoded
+  // PaddleOCR call in core.ocrImage survived the suite while every live batch of
+  // screenshots reported "0 image(s) contain text" — the RapidOCR venv was
+  // installed and the legacy paddle venv was not.
+  const dir = mkdtempSync(join(tmpdir(), 'picturereader-batch-ocr-'));
+  const stub = join(dir, 'stub-ocr');
+  writeFileSync(
+    stub,
+    [
+      '#!/usr/bin/env node',
+      'const payload = {',
+      "  engine: 'rapid', langs: ['ch'], width: 100, height: 100, tiles: 1, notes: [],",
+      "  lines: [{ text: 'Title of the page', score: 0.99, x: 1, y: 2, width: 3, height: 4 },",
+      "           { text: 'Some body sentence one', score: 0.98, x: 1, y: 22, width: 3, height: 4 }]",
+      '};',
+      "process.stdout.write('@@PICTUREREADER-OCR@@\\n');",
+      "process.stdout.write(Buffer.from(JSON.stringify(payload)).toString('base64') + '\\n');"
+    ].join('\n')
+  );
+  chmodSync(stub, 0o755);
+  const saved = { ocr: process.env.DSH_OCR_PYTHON, paddle: process.env.DSH_PADDLE_PYTHON };
+  process.env.DSH_OCR_PYTHON = stub;
+  process.env.DSH_PADDLE_PYTHON = join(dir, 'no-such-paddle');
+  try {
+    const { ctx } = makeFakeCtx({ 'a.png': TEXT_PNG }, { ocr: null }); // deliberately no seam
+    const tool = createImageBatchTool(ctx);
+    const result = await tool.execute({ file_paths: ['a.png'], auto_ocr: 'always' }, EXEC);
+    assert.equal(result.items[0].has_text, true, 'the installed engine must be used for the text probe');
+    assert.equal(result.items[0].type, 'text');
+    assert.ok(
+      String(result.items[0].ocr_excerpt ?? '').includes('Title of the page'),
+      'the probe excerpt must come from the installed engine'
+    );
+  } finally {
+    if (saved.ocr === undefined) delete process.env.DSH_OCR_PYTHON; else process.env.DSH_OCR_PYTHON = saved.ocr;
+    if (saved.paddle === undefined) delete process.env.DSH_PADDLE_PYTHON; else process.env.DSH_PADDLE_PYTHON = saved.paddle;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

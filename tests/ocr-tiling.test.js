@@ -279,6 +279,60 @@ test('ocrEngine: rapid wins, paddle is the legacy fallback, null when nothing is
   }
 });
 
+test('ocrImage: dispatches to the installed engine instead of a hardcoded PaddleOCR', async () => {
+  // Regression: `ocrImage` called runPaddleOcr unconditionally, so on an install
+  // with only the RapidOCR venv — which is what scripts/install.py provisions —
+  // every caller of this buffer pipeline (image_batch's text probe and
+  // vision_analyze's OCR evidence) failed with "PaddleOCR interpreter not found"
+  // while a working engine sat right there.
+  const dir = mkdtempSync(join(tmpdir(), 'picturereader-ocr-test-'));
+  const { stub, record } = makeStub(dir);
+  const saved = {
+    ocr: process.env.DSH_OCR_PYTHON,
+    paddle: process.env.DSH_PADDLE_PYTHON,
+    rec: process.env.STUB_RECORD
+  };
+  process.env.STUB_RECORD = record;
+  try {
+    const core = await import(`../src/core.js?t=${Date.now()}-imgdispatch`);
+    const png = core.encodePng(Buffer.alloc(8 * 8 * 4), 8, 8);
+
+    // a RapidOCR-only host must not reach for a missing PaddleOCR venv
+    process.env.DSH_OCR_PYTHON = stub;
+    process.env.DSH_PADDLE_PYTHON = join(dir, 'no-such-paddle');
+    const rapid = await core.ocrImage(png, '.png', {});
+    assert.equal(rapid.engine, 'rapid');
+    assert.equal(rapid.width, 8);
+    assert.equal(rapid.height, 8);
+    assert.equal(rapid.lines[0].text, 'Hello');
+    assert.ok(
+      readFileSync(record, 'utf8').split('\n')[0].endsWith('ocr.py'),
+      'the RapidOCR runner must be the interpreter that ran'
+    );
+
+    // a legacy paddle-only host keeps working
+    process.env.DSH_OCR_PYTHON = join(dir, 'nope');
+    process.env.DSH_PADDLE_PYTHON = stub;
+    const paddle = await core.ocrImage(png, '.png', {});
+    assert.equal(paddle.engine, 'paddle');
+    assert.equal(paddle.lines[0].text, 'Hello');
+    assert.ok(
+      !readFileSync(record, 'utf8').split('\n')[0].endsWith('ocr.py'),
+      'the legacy path hands the interpreter a script with -c, not ocr.py'
+    );
+
+    // nothing installed stays an actionable error rather than an empty result
+    process.env.DSH_OCR_PYTHON = join(dir, 'nope');
+    process.env.DSH_PADDLE_PYTHON = join(dir, 'nope2');
+    await assert.rejects(() => core.ocrImage(png, '.png', {}), /no local OCR engine is installed/);
+  } finally {
+    if (saved.ocr === undefined) delete process.env.DSH_OCR_PYTHON; else process.env.DSH_OCR_PYTHON = saved.ocr;
+    if (saved.paddle === undefined) delete process.env.DSH_PADDLE_PYTHON; else process.env.DSH_PADDLE_PYTHON = saved.paddle;
+    if (saved.rec === undefined) delete process.env.STUB_RECORD; else process.env.STUB_RECORD = saved.rec;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('renderOcr: reports the engine, the language set and the tiling note', async () => {
   const core = await import(`../src/core.js?t=${Date.now()}-render`);
   const text = core.renderOcr({

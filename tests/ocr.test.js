@@ -8,8 +8,10 @@
  *   - the `image_ocr` tool tests drive the engine-agnostic path (ocrFile) and
  *     need whichever engine is installed — they assert the RapidOCR contract
  *     because that is what scripts/install.py provisions by default;
- *   - `ocrImage` / `runPaddleOcr` are the legacy PaddleOCR-only primitives and
- *     need the `paddle` venv specifically.
+ *   - the `ocrImage` buffer pipeline (`image_batch`, `vision_analyze`) resolves
+ *     the engine the same way and only needs an engine to exist;
+ *   - `runPaddleOcr` is the legacy PaddleOCR-only primitive and needs the
+ *     `paddle` venv specifically.
  *
  * A missing venv skips the engine-backed tests instead of failing, which keeps
  * the suite green on a fresh checkout; everything that does not need an engine
@@ -42,7 +44,6 @@ const CHECKED_IN_FIXTURE = join(HERE, 'fixtures', 'ocr-text.png');
 
 /** Whether the legacy PaddleOCR environment is installed. */
 const PADDLE_READY = existsSync(paddlePython());
-const NEED_PADDLE = PADDLE_READY ? false : `PaddleOCR venv not found at ${paddlePython()} — run: python3 scripts/install.py`;
 
 /**
  * Whether the default RapidOCR environment is installed. The tool-level tests
@@ -51,6 +52,12 @@ const NEED_PADDLE = PADDLE_READY ? false : `PaddleOCR venv not found at ${paddle
  */
 const RAPID_READY = existsSync(ocrPython());
 const NEED_RAPID = RAPID_READY ? false : `RapidOCR venv not found at ${ocrPython()} — run: python3 scripts/install.py`;
+
+/**
+ * `ocrImage` resolves the engine through `ocrEngine`, so unlike the old
+ * PaddleOCR-only primitive it only needs *an* engine to be installed.
+ */
+const NEED_OCR = (RAPID_READY || PADDLE_READY) ? false : 'no local OCR engine is installed — run: python3 scripts/install.py';
 
 /** Provide the text-bearing test image from the checked-in fixture. */
 function ensureOcrTestImage() {
@@ -209,7 +216,7 @@ test('image_ocr tool: the schema no longer exposes an engine parameter', () => {
   assert.ok(tool.output.schema.properties.lang, 'the resolved recognition-model key is reported');
 });
 
-test('ocrImage: recognizes English and Chinese text end to end', { skip: NEED_PADDLE }, async () => {
+test('ocrImage: recognizes English and Chinese text end to end', { skip: NEED_OCR }, async () => {
   ensureOcrTestImage();
   const { readFileSync } = await import('node:fs');
   const buffer = readFileSync(OUT);
@@ -221,7 +228,7 @@ test('ocrImage: recognizes English and Chinese text end to end', { skip: NEED_PA
   assert.ok(result.lines[0].x >= 0 && result.lines[0].width > 0, 'line box should be populated');
 });
 
-test('ocrImage: region crop restricts recognition', { skip: NEED_PADDLE }, async () => {
+test('ocrImage: region crop restricts recognition', { skip: NEED_OCR }, async () => {
   ensureOcrTestImage();
   const { readFileSync } = await import('node:fs');
   const buffer = readFileSync(OUT);
