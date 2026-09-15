@@ -20,8 +20,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   cropRgba,
@@ -279,6 +280,60 @@ test('image_ocr tool: the configured OCR language is used when no argument is gi
     assert.equal(explicit.lang, 'ch', 'an explicit argument overrides the setting');
   } finally {
     setRuntimeConfig({ mode: 'smart' });
+  }
+});
+
+test('image_ocr tool: the configured OCR priority reaches the runner in order', async () => {
+  // A stub interpreter records its argv and echoes the model order back, so
+  // this covers settings -> runner -> payload without an installed engine.
+  const dir = mkdtempSync(join(tmpdir(), 'picturereader-priority-'));
+  const stub = join(dir, 'stub-ocr');
+  const record = join(dir, 'argv.txt');
+  writeFileSync(
+    stub,
+    [
+      '#!/usr/bin/env node',
+      "const { writeFileSync } = require('node:fs');",
+      'const argv = process.argv.slice(2);',
+      'writeFileSync(process.env.STUB_RECORD, argv.join("\\n"));',
+      "const priority = argv.includes('--priority') ? argv[argv.indexOf('--priority') + 1] : 'auto';",
+      // The first model wins a tie, so the order is what the reader gets back.
+      "const langs = priority === 'cyrillic' ? ['eslav', 'ch'] : ['ch', 'eslav'];",
+      "const payload = { engine: 'rapid', langs, width: 8, height: 8, tiles: 1, notes: [], lines: [] };",
+      "process.stdout.write('@@PICTUREREADER-OCR@@\\n');",
+      "process.stdout.write(Buffer.from(JSON.stringify(payload)).toString('base64') + '\\n');"
+    ].join('\n')
+  );
+  chmodSync(stub, 0o755);
+  const previousPython = process.env.DSH_OCR_PYTHON;
+  const previousRecord = process.env.STUB_RECORD;
+  process.env.DSH_OCR_PYTHON = stub;
+  process.env.STUB_RECORD = record;
+  const { setRuntimeConfig } = await import('../src/runtime.js');
+  try {
+    ensureOcrTestImage();
+    const { readFileSync } = await import('node:fs');
+    const { ctx } = makeFakeCtx(readFileSync(OUT));
+    const tool = createImageOcrTool(ctx);
+
+    setRuntimeConfig({ mode: 'smart', ocr_priority: 'cyrillic' });
+    const cyrillic = await tool.execute({ file_path: 'ui.png' }, EXEC);
+    const argv = readFileSync(record, 'utf8').split('\n');
+    assert.equal(argv[argv.indexOf('--priority') + 1], 'cyrillic', 'the setting must reach the runner');
+    assert.ok(!argv.includes('--language'), 'no OCR language is configured, so none is passed');
+    assert.equal(cyrillic.lang, 'eslav+ch', 'the Slavic model runs first and is reported first');
+
+    setRuntimeConfig({ mode: 'smart' });
+    const fallback = await tool.execute({ file_path: 'ui.png' }, EXEC);
+    assert.ok(!readFileSync(record, 'utf8').split('\n').includes('--priority'), 'unset priority passes nothing');
+    assert.equal(fallback.lang, 'ch+eslav', 'the built-in order is the CJK-first default');
+  } finally {
+    setRuntimeConfig({ mode: 'smart' });
+    if (previousPython === undefined) delete process.env.DSH_OCR_PYTHON;
+    else process.env.DSH_OCR_PYTHON = previousPython;
+    if (previousRecord === undefined) delete process.env.STUB_RECORD;
+    else process.env.STUB_RECORD = previousRecord;
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

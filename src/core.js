@@ -1175,11 +1175,12 @@ export async function ocrAvailable() {
  * so JavaScript never holds a full-resolution bitmap.
  *
  * @param inputPath - absolute path to the image.
- * @param options - `{ language, region, focus, tile, timeoutMs, signal, python }`.
+ * @param options - `{ language, priority, region, focus, tile, timeoutMs, signal, python }`.
  * @returns `{ engine, langs, width, height, tiles, lines, notes }`.
  */
 export function runRapidOcrFile(inputPath, {
   language,
+  priority,
   region,
   focus,
   tile = 'auto',
@@ -1191,6 +1192,11 @@ export function runRapidOcrFile(inputPath, {
   const args = [OCR_SCRIPT_PATH, '--input', String(inputPath), '--tile', String(tile)];
   if (language !== undefined && language !== null && String(language).trim() !== '') {
     args.push('--language', String(language).trim());
+  }
+  // Model order for `auto`: it only decides which model wins a tie, so the
+  // runner ignores it whenever `--language` names the models itself.
+  if (priority !== undefined && priority !== null && String(priority).trim() !== '') {
+    args.push('--priority', String(priority).trim());
   }
   if (Array.isArray(region)) args.push('--region', region.join(','));
   if (Array.isArray(focus)) args.push('--focus', focus.join(','));
@@ -1391,10 +1397,10 @@ export function runPaddleOcr(pngPath, { language } = {}) {
  *
  * @param buffer - raw image bytes.
  * @param ext - lowercase extension ('.png' etc.).
- * @param options - `{ region, language }`.
+ * @param options - `{ region, language, priority }`.
  * @returns `{ engine, width, height, lines }`.
  */
-export async function ocrImage(buffer, ext, { region, language } = {}) {
+export async function ocrImage(buffer, ext, { region, language, priority } = {}) {
   const image = decodeImage(buffer, ext);
   let work = image;
   if (region !== undefined) {
@@ -1411,6 +1417,7 @@ export async function ocrImage(buffer, ext, { region, language } = {}) {
       // a plain PNG and must not crop a second time.
       const result = await runRapidOcrFile(tmpPath, {
         ...(language !== undefined ? { language } : {}),
+        ...(priority !== undefined ? { priority } : {}),
         python
       });
       return { engine: 'rapid', width: work.width, height: work.height, lines: result.lines };

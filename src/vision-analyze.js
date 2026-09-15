@@ -226,12 +226,14 @@ export function createVisionAnalyzeTool(ctx) {
         const language = args.ocr_language === undefined
           ? (getRuntimeConfig().ocr?.language ?? '')
           : String(args.ocr_language).trim();
+        const priority = String(getRuntimeConfig().ocr?.priority ?? '').trim();
         // OCR is one evidence block among several: a missing or failing OCR
         // environment must not throw away the scan/VLM evidence already
         // gathered, so report it as a block and carry on.
         try {
           const ocr = await core.ocrImage(buf, ext, {
-            ...(language !== '' ? { language } : {})
+            ...(language !== '' ? { language } : {}),
+            ...(priority !== '' ? { priority } : {})
           });
           ocrText = core.renderOcr({
             path: target.displayPath,

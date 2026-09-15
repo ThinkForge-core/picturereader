@@ -121,6 +121,8 @@ The three modes constrain not only `vision_analyze` but also the `stream` interc
 
 `ch` and `eslav` ship with the environment — the installer warms them up, so they work offline immediately. Every other model is downloaded on first use into the environment's own model cache. The `language` argument of a call always overrides the setting.
 
+> **Which model wins a disagreement.** Naming a language above forces a *single* model. Leaving the setting empty keeps both models, and then the higher score wins each line — which means a **tie** is decided by the order the two models are asked in. The CJK model reports Cyrillic as runs of bare digits at a plausible confidence, so a Russian reader can set **OCR model order in auto mode** (`ocr_priority`) to `cyrillic`: both models still run, but the East Slavic one is asked first and keeps a tie. A Chinese reader sets `zh` (or leaves it empty, which is the same order). With a language selected, the priority has no effect.
+
 ### 4. Document to image — `document_to_image`
 
 Converts **pdf / docx / doc / xlsx / xls / pptx / ppt** page by page into PNG (LibreOffice headless → PDF → PyMuPDF) so the model can OCR or scan-analyze each page. Fully local, zero network; supports `dpi` / `max_pages` / `out_dir` and batch `file_paths`. PDFs are rendered directly by PyMuPDF; Office formats are first converted to PDF by headless LibreOffice, which is auto-detected (`DSH_SOFFICE`, then the state file, then `PATH`, then the usual Linux locations such as `/usr/bin/soffice`).
@@ -394,6 +396,7 @@ The card follows the settings-panel design language (grouped cards / pill button
 | `scan_palette` | `auto` | Default `image_scan` palette (auto/full/basic/gray). |
 | `scan_mode` | `auto` | Default `image_scan` mode (auto/ascii/color). |
 | `ocr_language` | empty | Default OCR language, as a BCP-47 tag (e.g. `ru`, `en-US`, `zh-Hans`) or a RapidOCR model key (e.g. `eslav`, `cyrillic`, `latin`), selecting the recognition model. Leave empty for the two-model default (Chinese/English + East Slavic); see the OCR languages table above. |
+| `ocr_priority` | empty (`auto`) | Which recognition model the two-model default asks first, and therefore which one wins a tie: `auto`/`zh` (CJK model first — better for a Chinese reader) or `cyrillic` (East Slavic model first — better for a Russian reader). Only used while `ocr_language` is left empty. |
 | `multimodal_models` | empty | Multimodal allowlist (comma separated): these models receive images directly without degradation. |
 | `request_guard` | `true` | Request guard — last-resort image block degradation on llm/stream. |
 | `batch_probe_first` | `3` | How many leading images `image_batch` probes to decide whether a batch is text-dense. |

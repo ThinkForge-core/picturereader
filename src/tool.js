@@ -369,6 +369,10 @@ export function createImageOcrTool(ctx) {
       const language = args.language === undefined
         ? (configuredLanguage === '' ? undefined : configuredLanguage)
         : String(args.language).trim();
+      // The two-model default reads every line twice and keeps the higher
+      // score; the configured priority decides the order, hence who wins a
+      // tie. It is inert once a language names the models itself.
+      const configuredPriority = String(getRuntimeConfig().ocr?.priority ?? '').trim();
 
       const cwd = exec.agent?.session?.header?.cwd;
       const target = await ctx.fs.resolve(filePath, {
@@ -416,6 +420,7 @@ export function createImageOcrTool(ctx) {
         writeFileSync(localPath, data);
         result = await core.ocrFile(localPath, {
           ...(language !== undefined ? { language } : {}),
+          ...(configuredPriority !== '' ? { priority: configuredPriority } : {}),
           ...(regionArray !== undefined ? { region: regionArray } : {}),
           ...(args.focus !== undefined ? { focus: args.focus } : {}),
           tile: tileMode
