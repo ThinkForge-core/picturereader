@@ -8,10 +8,16 @@
  *
  * Rules:
  *  (a) no platform references anywhere in the tracked sources;
- *  (b) no CJK text in the user-facing surface (README, skills, settings card).
+ *  (b) no CJK text in the user-facing surface (README, skills, settings card);
+ *  (c) no Cyrillic anywhere, in every file the suite can read.
  *
  * Code comments elsewhere may still be non-English, so (b) deliberately covers
- * only the files whose entire content reaches a user.
+ * only the files whose entire content reaches a user. (c) is deliberately
+ * unscoped and asymmetric with (b): CJK belongs to this project's subject matter
+ * (the recognition models are named and explained in the prose), while Cyrillic
+ * never does — a Cyrillic string here is always a localized reply alias, a stray
+ * docstring example or a fixture left over from a Russian-language session, i.e.
+ * the English-only rule leaking into a repository that ships to everyone.
  */
 
 import test from 'node:test';
@@ -101,6 +107,9 @@ function collect(dir, out = []) {
 
 const HAS_CJK = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef\u201c\u201d]/;
 
+/** Cyrillic, including the supplement and the two extended blocks. */
+const HAS_CYRILLIC = /[\u0400-\u04ff\u0500-\u052f\u2de0-\u2dff\ua640-\ua69f]/;
+
 function scan(patterns, files) {
   const offenders = [];
   for (const file of files) {
@@ -140,6 +149,11 @@ test('the user-facing surface contains no CJK text', () => {
     offenders.push(`${rel}:${line} — ${JSON.stringify(match[0])}`);
   }
   assert.deepEqual(offenders, [], `CJK text found in user-facing files:\n${offenders.join('\n')}`);
+});
+
+test('no Cyrillic text anywhere in the tracked sources', () => {
+  const offenders = scan([{ name: 'Cyrillic text', re: HAS_CYRILLIC }], collect(ROOT));
+  assert.deepEqual(offenders, [], `Cyrillic text found:\n${offenders.join('\n')}`);
 });
 
 test('no tool accepts an engine argument any more', async () => {

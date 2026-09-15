@@ -21,12 +21,12 @@ Two problems this script solves that the PaddleOCR path did not
    and merges the results back into whole-image coordinates.
 
 2. **Mixed scripts.** A single recognition model cannot read Cyrillic and CJK
-   at once: the Chinese model returns confident nonsense for Russian
-   ("Привет мир 12345" -> "0000012345", score 0.79). Detection is
-   script-agnostic, so we detect once per tile and recognize the *same* crops
-   with two models (Chinese/English + East Slavic), keeping the higher-scoring
-   reading of each line. Russian, English and Chinese then work in one pass
-   without the caller having to declare a language.
+   at once: the Chinese model returns confident nonsense for Cyrillic input,
+   reporting a Russian phrase as a run of bare digits at a plausible score.
+   Detection is script-agnostic, so we detect once per tile and recognize the
+   *same* crops with two models (Chinese/English + East Slavic), keeping the
+   higher-scoring reading of each line. Russian, English and Chinese then work
+   in one pass without the caller having to declare a language.
 
 Wire contract (unchanged from the PaddleOCR script, so the JS side is shared):
 stdout carries one base64-encoded JSON object; diagnostics go to stderr.

@@ -53,7 +53,7 @@ function makeStub(dir) {
       'writeFileSync(process.env.STUB_RECORD, process.argv.slice(2).join("\\n"));',
       'const payload = {',
       "  engine: 'rapid', langs: ['ch', 'eslav'], width: 1080, height: 20000,",
-      "  tiles: 14, notes: ['tiled'], lines: [{ text: 'Привет', score: 0.99, x: 1, y: 2, width: 3, height: 4 }]",
+      "  tiles: 14, notes: ['tiled'], lines: [{ text: 'Hello', score: 0.99, x: 1, y: 2, width: 3, height: 4 }]",
       '};',
       // Reproduce the `proot-distro login` hazard: a banner on stdout, one of
       // whose lines is valid base64 alphabet. Only the payload behind the
@@ -181,7 +181,7 @@ test('rapid runner: options reach the interpreter and the payload comes back', a
     assert.equal(result.height, 20000);
     assert.equal(result.tiles, 14);
     assert.deepEqual(result.notes, ['tiled']);
-    assert.equal(result.lines[0].text, 'Привет');
+    assert.equal(result.lines[0].text, 'Hello');
     assert.equal(result.lines[0].score, 0.99);
 
     const argv = readFileSync(record, 'utf8').split('\n');
@@ -290,13 +290,13 @@ test('renderOcr: reports the engine, the language set and the tiling note', asyn
     lang: 'ch+eslav',
     tiles: 14,
     notes: ['tiled into 14 pieces'],
-    lines: [{ text: 'Привет', score: 0.9, x: 1, y: 2, width: 3, height: 4 }]
+    lines: [{ text: 'Hello', score: 0.9, x: 1, y: 2, width: 3, height: 4 }]
   });
   assert.match(text, /engine=rapid/);
   assert.match(text, /lang=ch\+eslav/);
   assert.match(text, /tiles=14/);
   assert.match(text, /note: tiled into 14 pieces/);
-  assert.match(text, /Привет/);
+  assert.match(text, /Hello/);
 });
 
 test('rapid runner: a wrapper banner on stdout cannot corrupt the payload', async () => {
