@@ -138,8 +138,10 @@ does not). `image_edit` shipped `width: result.width ?? null` and
   library — the suites build small fake `ctx` objects with an in-memory `fs`.
 - Engine-backed tests gate on the venv and **skip** rather than fail:
   `RAPID_READY` (`$DSH_HOME/picturereader/venvs/ocr`) for the default engine,
-  `PADDLE_READY` (`.../venvs/paddle`) for the legacy `ocrImage` / `runPaddleOcr`
-  primitives. Keep that property when adding tests.
+  `PADDLE_READY` (`.../venvs/paddle`) for the legacy `runPaddleOcr` primitive.
+  `ocrFile` and `ocrImage` both resolve the engine through `ocrEngine()`, so
+  they need *an* engine, not a specific one. Keep that property when adding
+  tests.
 - The RapidOCR venv ships only the `ch` and `eslav` recognition models plus the
   detectors. A test that names another language (`en`, `ja`, ...) triggers a
   model download and fails on a read-only or offline host — stick to the bundled
