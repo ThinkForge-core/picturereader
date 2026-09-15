@@ -43,6 +43,7 @@ function build(raw) {
     },
     ocr: {
       language: String(v.ocr_language ?? ''),
+      priority: String(v.ocr_priority ?? ''),
     },
     scan: {
       defaultSize: v.scan_default_size !== undefined ? Number(v.scan_default_size) : 32,

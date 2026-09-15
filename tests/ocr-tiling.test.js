@@ -132,6 +132,10 @@ print(json.dumps({
   "ja": ocr.language_list("ja"),
   "key": ocr.language_list("cyrillic"),
   "unknown": ocr.language_list("qq-ZZ"),
+  "autoCyr": ocr.language_list("auto", "cyrillic"),
+  "autoZh": ocr.language_list("auto", "zh"),
+  "autoTypo": ocr.language_list("auto", "klingon"),
+  "tagIgnoresPriority": ocr.language_list("ru-RU", "cyrillic"),
 }))
 `);
   const r = JSON.parse(out);
@@ -144,6 +148,11 @@ print(json.dumps({
   assert.deepEqual(r.ja, ['japan']);
   assert.deepEqual(r.key, ['cyrillic'], 'a raw engine key must pass through');
   assert.deepEqual(r.unknown, ['ch', 'eslav'], 'an unknown tag falls back to auto');
+  // The first model wins a tie, so the order *is* the priority.
+  assert.deepEqual(r.autoCyr, ['eslav', 'ch'], 'cyrillic priority puts the Slavic model first');
+  assert.deepEqual(r.autoZh, ['ch', 'eslav'], 'zh priority is the CJK-first default');
+  assert.deepEqual(r.autoTypo, ['ch', 'eslav'], 'an unknown priority must degrade to auto, not raise');
+  assert.deepEqual(r.tagIgnoresPriority, ['eslav'], 'an explicit language names its own models');
 });
 
 test('ocr.py: every recognition model exists for the version it asks for', { skip: PY === null }, () => {
@@ -172,6 +181,7 @@ test('rapid runner: options reach the interpreter and the payload comes back', a
     const core = await import(`../src/core.js?t=${Date.now()}`);
     const result = await core.runRapidOcrFile('/tmp/whatever.png', {
       language: 'ru-RU',
+      priority: 'cyrillic',
       region: [0.1, 0.2, 0.9, 0.8],
       tile: 'on'
     });
@@ -189,6 +199,7 @@ test('rapid runner: options reach the interpreter and the payload comes back', a
     assert.deepEqual(argv.slice(1, 4), ['--input', '/tmp/whatever.png', '--tile']);
     assert.equal(argv[4], 'on');
     assert.ok(argv.includes('--language') && argv[argv.indexOf('--language') + 1] === 'ru-RU');
+    assert.ok(argv.includes('--priority') && argv[argv.indexOf('--priority') + 1] === 'cyrillic');
     assert.ok(argv.includes('--region') && argv[argv.indexOf('--region') + 1] === '0.1,0.2,0.9,0.8');
     assert.ok(!argv.includes('--focus'), 'focus must be omitted when only a region is given');
   } finally {
@@ -215,6 +226,7 @@ test('rapid runner: focus is passed through instead of a region', async () => {
     assert.ok(!argv.includes('--region'));
     assert.equal(argv[argv.indexOf('--tile') + 1], 'auto', 'tile defaults to auto');
     assert.ok(!argv.includes('--language'), 'language is omitted when not requested');
+    assert.ok(!argv.includes('--priority'), 'priority is omitted when not requested');
     // ONNX Runtime would otherwise saturate every core on a phone.
     assert.equal(argv[argv.indexOf('--threads') + 1], '2', 'DSH_OCR_THREADS caps the thread pool');
   } finally {

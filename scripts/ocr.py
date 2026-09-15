@@ -106,12 +106,39 @@ PAYLOAD_MARKER = "@@PICTUREREADER-OCR@@"
 #: ``auto`` = read every line with both a CJK and a Slavic/European model.
 AUTO_LANGS: Tuple[str, ...] = ("ch", "eslav")
 
+#: Model order for ``auto``, by reader preference. Every line is read by both
+#: models and the higher score wins, so the first model wins a *tie* — the order
+#: therefore decides whose script survives a disagreement. The CJK model
+#: mangles Cyrillic into bare digits at a plausible score, so a Russian reader
+#: wants ``cyrillic``; a Chinese reader wants the CJK model first. ``auto`` and
+#: ``zh`` name the same order, so a Chinese deployment can state it explicitly.
+AUTO_LANGS_BY_PRIORITY: Dict[str, Tuple[str, ...]] = {
+    "auto": AUTO_LANGS,
+    "zh": AUTO_LANGS,
+    "cyrillic": ("eslav", "ch"),
+}
 
-def language_list(spec: Optional[str]) -> List[str]:
-    """Resolve a ``--language`` argument into an ordered list of model keys."""
+
+def normalize_priority(value: Optional[str]) -> str:
+    """Coerce a priority setting to a known key, falling back to ``auto``.
+
+    A typo in the settings card must not break every OCR call, so an unknown
+    value degrades to the default instead of raising.
+    """
+    raw = (value or "auto").strip().lower()
+    return raw if raw in AUTO_LANGS_BY_PRIORITY else "auto"
+
+
+def language_list(spec: Optional[str], priority: Optional[str] = "auto") -> List[str]:
+    """Resolve a ``--language`` argument into an ordered list of model keys.
+
+    ``priority`` is consulted only for ``auto``: it picks which of the two
+    models runs first, and the first model wins a tie. An explicit language or
+    model key already names its models, so it ignores the priority.
+    """
     raw = (spec or "auto").strip().lower()
     if raw in ("", "auto", "*"):
-        return list(AUTO_LANGS)
+        return list(AUTO_LANGS_BY_PRIORITY[normalize_priority(priority)])
     if raw in REC_VERSION:
         return [raw]
     # Traditional Chinese needs the whole tag, not just the primary subtag.
@@ -440,6 +467,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--input", help="path to the image to read")
     parser.add_argument("--language", default="auto",
                         help="BCP-47 tag, a RapidOCR language key, or 'auto' (default)")
+    parser.add_argument("--priority", default="auto",
+                        help="model order under 'auto': 'auto'/'zh' reads CJK first, "
+                             "'cyrillic' reads Cyrillic first; the first model wins a tie")
     parser.add_argument("--region", default=None,
                         help="optional x0,y0,x1,y1 fractions of the image")
     parser.add_argument("--focus", default=None,
@@ -464,9 +494,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.probe:
         env = describe_environment()
-        langs = language_list(args.language)
+        langs = language_list(args.language, args.priority)
         engine = OcrEngine(langs, args.max_side, args.threads)
         env["langs"] = engine.langs
+        env["priority"] = normalize_priority(args.priority)
         env["max_side"] = args.max_side
         sys.stdout.write("\n" + PAYLOAD_MARKER + "\n")
         sys.stdout.write(json.dumps(env, ensure_ascii=False) + "\n")
@@ -487,7 +518,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.region and args.focus:
         fail("--region and --focus are mutually exclusive")
 
-    langs = language_list(args.language)
+    langs = language_list(args.language, args.priority)
     engine = OcrEngine(langs, args.max_side, args.threads)
     if args.focus:
         try:
@@ -510,6 +541,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "engine": "rapid",
         "langs": engine.langs,
         "lang": args.language,
+        "priority": normalize_priority(args.priority),
         "width": int(width),
         "height": int(height),
         "tiles": int(tile_count),

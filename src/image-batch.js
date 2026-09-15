@@ -392,10 +392,13 @@ export function createImageBatchTool(ctx) {
         try {
           // The engine is whichever venv is installed (RapidOCR by default);
           // the recognition model is selected by the plugin's configured OCR
-          // language, when one is set.
+          // language, and its priority decides which model wins a tie when
+          // both are read (the two-model default).
           const language = String(getRuntimeConfig().ocr?.language ?? '');
+          const priority = String(getRuntimeConfig().ocr?.priority ?? '');
           const res = await ocrFn(item.raw, item.ext, {
-            ...(language !== '' ? { language } : {})
+            ...(language !== '' ? { language } : {}),
+            ...(priority !== '' ? { priority } : {})
           });
           results.set(item.index, { lines: res?.lines ?? [] });
           return results.get(item.index);
