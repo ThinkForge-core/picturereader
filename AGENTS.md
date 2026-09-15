@@ -13,7 +13,11 @@ to run the tests.
   reaches into the harness sources.
 - **`npm test` must stay green.** Engine-backed tests skip when the matching
   venv is absent, so the suite is expected to pass on a fresh checkout too.
-- English in code, comments, docs and commit messages. No emoji.
+- English in code, comments, docs and commit messages. No emoji, and no Cyrillic
+  text at any point — not even in a fixture or an input alias.
+  `tests/portability.test.js` fails the suite on the first Cyrillic character,
+  so a Russian sample string or a localized yes/no reply is a red build, not a
+  style question.
 - Do not run `scripts/install.py` / `scripts/uninstall.py` against a live
   profile just to "check" something — they create venvs and rewrite
   `$DSH_HOME/profiles/*/package.json`. Use `--dry-run`, `--selftest` or

@@ -445,7 +445,7 @@ def confirm(console, component, assume_yes):
         answer = input(prompt).strip().lower()
     except EOFError:
         return "quit"
-    if answer in ("y", "yes", "д"):
+    if answer in ("y", "yes"):
         return "yes"
     if answer in ("a", "all"):
         return "all"
