@@ -418,12 +418,25 @@ Each gets a small wrapper in `$PREFIX/bin` (`picturereader-media-python`,
 paths, so script and image paths mean the same thing on both sides and no path
 translation is needed.
 
-It then writes both interpreters into the state file, and adds the plugin to the
-`web` profile with `dsh plugin --profile web add <checkout>` — the same
-registration step `install.py` performs on Linux, repeated here because on a
-device it is the only part of `install.py` that could work. If `dsh` is not on
-`PATH`, or the profile does not exist yet, that step prints the exact command to
-run later instead of failing.
+It then writes both interpreters into the state file, and registers the plugin in
+the `web` profile — the same registration step `install.py` performs on Linux,
+repeated here because on a device it is the only part of `install.py` that could
+work.
+
+That registration goes through a **packed tarball**, never the checkout:
+`dsh plugin add <directory>` installs a pnpm `link:`, which is a symlink, and
+Node then resolves the plugin's imports from the checkout's real path — where
+the profile's peer dependencies are not reachable, neither the shared
+`@deepseek-ai/dsh-*` tree nor `@deepseek-ai/schemastery` — so the host dies at
+boot with `ERR_MODULE_NOT_FOUND`. A tarball is unpacked into the profile's own
+store with its peers linked beside it. `setup.sh` then imports the installed
+plugin exactly the way the host does and **fails loudly** if that import breaks,
+instead of leaving a stack trace for your next `dsh web`. Because the script
+repacks the checkout on every run, a local edit reaches the profile on the next
+run plus a restart.
+
+If `dsh` is not on `PATH`, or the profile does not exist yet, that step prints
+the exact command to run later instead of failing.
 
 Prefer the environment variables over the state file on a device: re-running
 `scripts/install.py` rewrites the state file and would drop those entries.

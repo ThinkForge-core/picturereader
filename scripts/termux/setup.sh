@@ -2,6 +2,13 @@
 #
 # picturereader — Termux "level 3" bootstrap.
 #
+# The shebang above is the one path in this file that is not derived from
+# $PREFIX at run time, because the kernel reads it before the script starts. It
+# names Termux's fixed prefix instead of the usual `#!/usr/bin/env bash`: Termux
+# is not FHS and has no /usr/bin, so the portable-looking form would not resolve
+# on the very platform this script exists for. Run it the way the README does —
+# `bash scripts/termux/setup.sh` — and the shebang is documentation either way.
+#
 # Sets up the plugin's Python environments on an Android device, where pip
 # cannot install them into Termux itself:
 #
@@ -405,11 +412,11 @@ OCR_WRAPPER="${PREFIX}/bin/picturereader-ocr-python"
 
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 if [ "$VERIFY_ONLY" = 0 ]; then
-  python3 - "$MEDIA_WRAPPER" "$OCR_WRAPPER" "$DSH_HOME_DIR" <<'PY'
+  python3 - "$MEDIA_WRAPPER" "$OCR_WRAPPER" "$DSH_HOME_DIR" "$DISTRO" <<'PY'
 import json, sys
 from pathlib import Path
 
-media, ocr, dsh_home = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+media, ocr, dsh_home, distro = sys.argv[1], sys.argv[2], Path(sys.argv[3]), sys.argv[4]
 state_file = dsh_home / "picturereader" / "env.json"
 state_file.parent.mkdir(parents=True, exist_ok=True)
 state = {}
@@ -421,10 +428,10 @@ if state_file.exists():
 venvs = state.setdefault("venvs", {})
 venvs["media"] = {"python": media, "roles": ["doc", "image"],
                   "label": "document + image processing (proot-distro)",
-                  "path": "proot-distro:debian:/opt/picturereader/media"}
+                  "path": "proot-distro:%s:/opt/picturereader/media" % distro}
 venvs["ocr"] = {"python": ocr, "roles": ["ocr"],
                 "label": "OCR (RapidOCR, proot-distro)",
-                "path": "proot-distro:debian:/opt/picturereader/ocr"}
+                "path": "proot-distro:%s:/opt/picturereader/ocr" % distro}
 state_file.write_text(json.dumps(state, indent=2) + "\n")
 print("  state file updated: %s" % state_file)
 PY
@@ -622,6 +629,6 @@ cat <<EOF
     * image_edit hides remove_background / raw_convert / upscale, which need
       packages Termux cannot provide. Installing the extras inside the rootfs
       brings them back:
-        proot-distro login debian -- $ROOT_VENVS/media/bin/python -m pip install rembg rawpy
+        proot-distro login $DISTRO -- $ROOT_VENVS/media/bin/python -m pip install rembg rawpy
 
 EOF
