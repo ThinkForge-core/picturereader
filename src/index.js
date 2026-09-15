@@ -191,7 +191,8 @@ const Config = z.object({
     .string()
     .default('')
     .description('Advanced: default OCR language as a BCP-47 tag, which selects the PaddleOCR recognition model. ' +
-      'The default model reads Chinese, English and Japanese; another script needs its own tag (ru for Russian, de for German, ar for Arabic, ...).'),
+      'Empty (or "auto") keeps the two-model default that ocr_priority orders. Another script needs its own tag ' +
+      '(ru for Russian, de for German, ar for Arabic, ...). A tag pins a single model and so switches ocr_priority off.'),
   ocr_priority: z
     .string()
     .default('')
