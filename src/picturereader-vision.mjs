@@ -253,6 +253,49 @@ export function refreshTwinAdapters(ctx, llm, getConfig) {
   return twinState.wrapped.size;
 }
 
+/** Static note used when the local analysis itself fails. */
+const IMAGE_OMITTED_NOTE = '[image omitted: local analysis failed; use image_scan on the file]';
+
+/** Replace every image block with {@link IMAGE_OMITTED_NOTE}, nesting included. */
+function stripImageBlocks(blocks) {
+  return (blocks ?? []).map((block) => {
+    if (block?.type === 'image') return { type: 'text', text: IMAGE_OMITTED_NOTE };
+    if (block?.type === 'tool-result' && Array.isArray(block.content)) {
+      return { ...block, content: stripImageBlocks(block.content) };
+    }
+    return block;
+  });
+}
+
+/**
+ * Emergency rewrite used when the normal sanitizer throws.
+ *
+ * Forwarding the original messages on failure - the previous behaviour - is
+ * the one outcome that must never happen: a text-only adapter rejects the
+ * whole request and the image stays in the durable log, so every later turn
+ * fails the same way.
+ */
+function stripImagesToText(messages) {
+  return (messages ?? []).map((message) => {
+    if (!Array.isArray(message?.content)) return message;
+    return { ...message, content: stripImageBlocks(message.content) };
+  });
+}
+
+/**
+ * True when this exact route needs the local-reading rewrite: it is one of the
+ * checked vision models AND the request carries an image.
+ *
+ * Only a checked model is rewritten. For every other model the harness still
+ * applies its own image policy - a text-only route refuses `read_image` and
+ * projects stray images to text - so rewriting there would only take the image
+ * away from a model that can actually see it.
+ */
+function needsLocalReading(getConfig, provider, model, messages) {
+  if (!isSelected(getConfig, provider, model)) return false;
+  return (messages ?? []).some((msg) => contentHasImage(msg?.content));
+}
+
 /** 若 provider 当前 adapter 尚未被包装（非孪生 proxy），则包装之。 */
 function wrapProvider(state, ctx, llm, provider, getConfig) {
   let reg;
@@ -292,12 +335,13 @@ function wrapProvider(state, ctx, llm, provider, getConfig) {
             // 必须是异步生成器：dsh-llm 对 stream() 的返回值做 for await
             // （要求 [Symbol.asyncIterator]）；async 函数返回 Promise 会崩。
             result.stream = async function* (options) {
-              if (options?.messages?.some((msg) => contentHasImage(msg?.content))) {
-                // 防御：图片分析失败时原样放行，绝不让流中断污染会话
+              const model = options?.model ?? m;
+              if (needsLocalReading(getConfig, p, model, options?.messages)) {
                 try {
                   options = { ...options, messages: await sanitizeImages(ctx, options.messages) };
                 } catch (e) {
-                  console.error('[picturereader] sanitizeImages failed, forwarding original messages:', e?.message || e);
+                  console.error('[picturereader] sanitizeImages failed, using the static note:', e?.message || e);
+                  options = { ...options, messages: stripImagesToText(options.messages) };
                 }
               }
               yield* preparedStream(options);
@@ -308,11 +352,12 @@ function wrapProvider(state, ctx, llm, provider, getConfig) {
       }
       if (prop === 'stream') {
         return async function* (options) {
-          if (options?.messages?.some((msg) => contentHasImage(msg?.content))) {
+          if (needsLocalReading(getConfig, provider, options?.model, options?.messages)) {
             try {
               options = { ...options, messages: await sanitizeImages(ctx, options.messages) };
             } catch (e) {
-              console.error('[picturereader] sanitizeImages failed, forwarding original messages:', e?.message || e);
+              console.error('[picturereader] sanitizeImages failed, using the static note:', e?.message || e);
+              options = { ...options, messages: stripImagesToText(options.messages) };
             }
           }
           yield* origStream(options);

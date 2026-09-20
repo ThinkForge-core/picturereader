@@ -23,7 +23,7 @@ import { setRuntimeConfig } from '../src/runtime.js';
 // at a scratch directory before the module is evaluated.
 const home = await mkdtemp(join(tmpdir(), 'pr-nesting-home-'));
 process.env.DSH_HOME = home;
-const { sanitizeImages } = await import('../src/picturereader-vision.mjs');
+const { sanitizeImages, registerTwinAdapters } = await import('../src/picturereader-vision.mjs');
 
 const attachment = { attachmentId: 'nested123456', mediaType: 'image/png', name: 'shot.png' };
 
@@ -141,4 +141,76 @@ test('post-execute: a whitelisted multimodal model keeps its image', async () =>
   } finally {
     setRuntimeConfig({ mode: 'smart', request_guard: true, multimodal_models: '' });
   }
+});
+
+/** A fake LLM service exposing one wrappable provider. */
+function fakeLlm() {
+  const seen = [];
+  const target = {
+    listModels: async () => [],
+    resolveModel: async (p, m) => ({ provider: p, id: m, name: m, inputModalities: ['text'] }),
+    prepareCall: async (p, m) => ({
+      model: { provider: p, id: m, name: m, inputModalities: ['text'] },
+      stream: async function* (options) { seen.push(options); },
+    }),
+    stream: async function* (options) { seen.push(options); },
+  };
+  const registration = { provider: { id: 'test-provider' }, adapter: target };
+  return { seen, target, registration, llm: { registration: () => registration } };
+}
+
+/** A minimal Cordis-like context for `registerTwinAdapters`. */
+function twinCtx(get) {
+  return { on: () => {}, off: () => {}, effect: (fn) => fn(), get };
+}
+
+/** One request carrying a pasted image. */
+function imageRequest(model) {
+  return { model, messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', attachment }] }] };
+}
+
+async function drain(iterable) {
+  for await (const _chunk of iterable) { /* drain */ }
+}
+
+const CONFIG = () => ({ vision_models: [{ id: 'checked-model', provider: 'test-provider' }] });
+
+test('twin: only a checked model gets the local-reading rewrite', async () => {
+  const { seen, registration, llm } = fakeLlm();
+  const attachments = { readImage: async () => ({ data: Buffer.from([1, 2, 3]) }) };
+  registerTwinAdapters(twinCtx((name) => (name === 'attachments' ? attachments : undefined)), llm, CONFIG);
+
+  const unchecked = await registration.adapter.prepareCall('test-provider', 'other-model', undefined);
+  await drain(unchecked.stream(imageRequest('other-model')));
+  assert.equal(seen.at(-1).messages[0].content[1].type, 'image', 'an unchecked route keeps its image');
+
+  const checked = await registration.adapter.prepareCall('test-provider', 'checked-model', undefined);
+  await drain(checked.stream(imageRequest('checked-model')));
+  const block = seen.at(-1).messages[0].content[1];
+  assert.equal(block.type, 'text', 'a checked route degrades the image locally');
+  assert.ok(block.text.includes('image_scan'), 'the note points at the local tools');
+});
+
+test('twin: a failing local analysis still never forwards the image', async () => {
+  const { seen, registration, llm } = fakeLlm();
+  const broken = { readImage: async () => { throw new Error('boom'); } };
+  registerTwinAdapters(twinCtx((name) => (name === 'attachments' ? broken : undefined)), llm, CONFIG);
+
+  const checked = await registration.adapter.prepareCall('test-provider', 'checked-model', undefined);
+  await drain(checked.stream(imageRequest('checked-model')));
+  const block = seen.at(-1).messages[0].content[1];
+  assert.equal(block.type, 'text', 'the image is replaced even when its analysis fails');
+  assert.ok(block.text.includes('image_scan'));
+});
+
+test('twin: a crashing sanitizer falls back to a static note, not the image', async () => {
+  const { seen, registration, llm } = fakeLlm();
+  const throwing = () => { throw new Error('ctx boom'); };
+  registerTwinAdapters(twinCtx(throwing), llm, CONFIG);
+
+  const checked = await registration.adapter.prepareCall('test-provider', 'checked-model', undefined);
+  await drain(checked.stream(imageRequest('checked-model')));
+  const block = seen.at(-1).messages[0].content[1];
+  assert.equal(block.type, 'text', 'the image must never reach the adapter');
+  assert.match(block.text, /image omitted/);
 });

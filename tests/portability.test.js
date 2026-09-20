@@ -9,7 +9,8 @@
  * Rules:
  *  (a) no platform references anywhere in the tracked sources;
  *  (b) no CJK text in the user-facing surface (README, skills, settings card);
- *  (c) no Cyrillic anywhere, in every file the suite can read.
+ *  (c) no Cyrillic anywhere, in every file the suite can read - except the
+ *      git-excluded local instruction overlays (see LOCAL_ONLY_FILES).
  *
  * Code comments elsewhere may still be non-English, so (b) deliberately covers
  * only the files whose entire content reaches a user. (c) is deliberately
@@ -23,7 +24,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, dirname, relative, sep } from 'node:path';
+import { join, dirname, relative, sep, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -82,6 +83,16 @@ const USER_FACING_FILES = [
   'skills/image-reading.md',
   'skills/vision-analyze.md'
 ];
+
+/**
+ * Files that exist only in one working copy.
+ *
+ * The instruction overlays (`AGENTS.local.md`, `CLAUDE.local.md`) are
+ * deliberately git-excluded - they carry per-checkout notes for an agent and
+ * are written in whatever language their author speaks. They are not part of
+ * the repository this guard protects, so the unscoped Cyrillic rule skips them.
+ */
+const LOCAL_ONLY_FILES = new Set(['AGENTS.local.md', 'CLAUDE.local.md']);
 
 /**
  * Collect every scannable file under a directory.
@@ -152,7 +163,8 @@ test('the user-facing surface contains no CJK text', () => {
 });
 
 test('no Cyrillic text anywhere in the tracked sources', () => {
-  const offenders = scan([{ name: 'Cyrillic text', re: HAS_CYRILLIC }], collect(ROOT));
+  const files = collect(ROOT).filter((f) => !LOCAL_ONLY_FILES.has(basename(f)));
+  const offenders = scan([{ name: 'Cyrillic text', re: HAS_CYRILLIC }], files);
   assert.deepEqual(offenders, [], `Cyrillic text found:\n${offenders.join('\n')}`);
 });
 
