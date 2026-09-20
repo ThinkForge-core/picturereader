@@ -105,10 +105,25 @@ async function bridgeShaAttachmentText(text, dir, mode, objectsDir) {
   return bridged;
 }
 
-/** 判断消息是否含 image content block。 */
+/** True when any block is an image, descending into nested `tool-result` content. */
+export function contentHasImageBlock(blocks) {
+  return (blocks ?? []).some(
+    (b) => b?.type === 'image'
+      || (b?.type === 'tool-result' && contentHasImageBlock(b.content)),
+  );
+}
+
+/**
+ * True when any message carries an image block.
+ *
+ * This must walk `tool-result.content`: the harness helper of the same intent
+ * (`contentHasImage`) does, and a `read_image` result nests its image there.
+ * A shallow check made the `llm/stream` guard skip exactly that case, leaving
+ * the image for a text-only adapter to reject.
+ */
 export function hasImageBlock(messages) {
   return (messages ?? []).some(
-    (m) => Array.isArray(m?.content) && m.content.some((b) => b?.type === 'image'),
+    (m) => Array.isArray(m?.content) && contentHasImageBlock(m.content),
   );
 }
 
@@ -148,12 +163,61 @@ export async function exportImage(attachment, ctx, dir) {
 }
 
 /**
- * 把消息里的 image block 替换成文本引导。纯函数（可测）。
- * 读取当前 runtime mode 生成对应策略。
- * @param {Array} messages - 待处理消息。
- * @param {object} ctx - 提供 ctx.attachments。
- * @param {string} dir - 图片导出目录。
- * @returns {Promise<Array>} 处理后消息（图片消息被替换成 fresh frozen 对象）。
+ * Rewrite one content array, descending into nested `tool-result` content.
+ * @param {Array} blocks - content blocks to process.
+ * @param {object} ctx - provides ctx.attachments.
+ * @param {string} dir - image export directory.
+ * @param {string} mode - current runtime mode.
+ * @param {string|undefined} objectsDir - attachment object store override.
+ * @returns {Promise<Array>} the original array when nothing changed.
+ */
+async function bridgeBlocks(blocks, ctx, dir, mode, objectsDir) {
+  const next = [];
+  let changed = false;
+  for (const block of blocks) {
+    if (block?.type === 'image') {
+      let path;
+      try {
+        path = await exportImage(block.attachment, ctx, dir);
+      } catch {
+        // A failed export degrades to a plain note instead of failing the turn.
+        next.push({ type: 'text', text: '[An image attachment was pasted; the plugin will try to read and analyze it]' });
+        changed = true;
+        continue;
+      }
+      const name = block.attachment.name ? ` (${block.attachment.name})` : '';
+      next.push({ type: 'text', text: imageToolGuidance(path, mode, name) });
+      changed = true;
+      continue;
+    }
+    if (block?.type === 'tool-result' && Array.isArray(block.content)) {
+      const content = await bridgeBlocks(block.content, ctx, dir, mode, objectsDir);
+      if (content !== block.content) {
+        next.push({ ...block, content });
+        changed = true;
+        continue;
+      }
+    }
+    if (block?.type === 'text' && typeof block.text === 'string') {
+      const text = await bridgeShaAttachmentText(block.text, dir, mode, objectsDir);
+      if (text !== block.text) {
+        next.push({ ...block, text });
+        changed = true;
+        continue;
+      }
+    }
+    next.push(block);
+  }
+  return changed ? next : blocks;
+}
+
+/**
+ * Replace image blocks in messages with text guidance. Pure (testable).
+ * Reads the current runtime mode for the policy wording.
+ * @param {Array} messages - messages to process.
+ * @param {object} ctx - provides ctx.attachments.
+ * @param {string} dir - image export directory.
+ * @returns {Promise<Array>} processed messages (image messages become fresh frozen objects).
  */
 export async function bridgeMessages(messages, ctx, dir, { attachmentObjectsDir } = {}) {
   const mode = getRuntimeConfig()?.mode ?? 'smart';
@@ -164,35 +228,8 @@ export async function bridgeMessages(messages, ctx, dir, { attachmentObjectsDir 
       next.push(message);
       continue;
     }
-    const blocks = [];
-    let changed = false;
-    for (const block of content) {
-      if (block?.type === 'image') {
-        let path;
-        try {
-          path = await exportImage(block.attachment, ctx, dir);
-        } catch {
-          // A failed export degrades to a plain note instead of failing the turn.
-          blocks.push({ type: 'text', text: '[An image attachment was pasted; the plugin will try to read and analyze it]' });
-          changed = true;
-          continue;
-        }
-        const name = block.attachment.name ? ` (${block.attachment.name})` : '';
-        blocks.push({ type: 'text', text: imageToolGuidance(path, mode, name) });
-        changed = true;
-        continue;
-      }
-      if (block?.type === 'text' && typeof block.text === 'string') {
-        const text = await bridgeShaAttachmentText(block.text, dir, mode, attachmentObjectsDir);
-        if (text !== block.text) {
-          blocks.push({ ...block, text });
-          changed = true;
-          continue;
-        }
-      }
-      blocks.push(block);
-    }
-    next.push(changed ? deepFreeze({ ...message, content: blocks }) : message);
+    const bridged = await bridgeBlocks(content, ctx, dir, mode, attachmentObjectsDir);
+    next.push(bridged === content ? message : deepFreeze({ ...message, content: bridged }));
   }
   return next;
 }
@@ -258,20 +295,24 @@ export function attachImageBridge(ctx) {
   // 将其替换为文本引导，避免后续请求因 image block 导致 UNSUPPORTED_CONTENT 错误。
   ctx.on('tools/post-execute', async (exec, result, next) => {
     try {
-      if (exec.name === 'read_image' && !result.isError) {
-        // 检查结果中是否包含 image block
-        const hasImage = result.content?.some(b => b.type === 'image');
-        if (hasImage) {
+      if (exec.name === 'read_image' && result?.isError !== true && contentHasImageBlock(result.content)) {
+        // The harness contract is a PostToolDecision: `next()` returns
+        // `{ kind: 'accept' }`, so a replaced local variable used to be dropped
+        // and the image stayed in the durable log forever. Return the decision.
+        const rt = getRuntimeConfig();
+        const guardOn = rt?.requestGuard !== false;
+        const multimodal = rt?.multimodalModels || [];
+        const model = exec.agent?.session?.requestHeader?.()?.config?.model ?? '';
+        if (guardOn && !multimodal.includes(model)) {
           const filePath = exec.arguments?.file_path || 'the image file';
-          // 替换为文本引导，移除 image block
-          result = {
-            ...result,
+          console.log('[picturereader] intercepted read_image image block, replaced with text guidance');
+          return {
+            kind: 'accept',
             content: [{
               type: 'text',
-              text: `[Image read: ${filePath}]\n\nThe current model does not accept image input, so the picture cannot be processed directly. Use the picturereader tools to analyze it:\n- image_scan(file_path="${filePath}") — pixel-level scan: layout / colors / structure\n- image_ocr(file_path="${filePath}") — text recognition\n- vision_analyze(file_path="${filePath}") — unified image understanding\n\nThese tools work with every model and do not require image-input support.`
+              text: `[Image read: ${filePath}]\n\nThe current model does not accept image input, so the picture cannot be processed directly. Use the picturereader tools to analyze it:\n- image_scan(file_path="${filePath}") - pixel-level scan: layout / colors / structure\n- image_ocr(file_path="${filePath}") - text recognition\n- vision_analyze(file_path="${filePath}") - unified image understanding\n\nThese tools work with every model and do not require image-input support.`
             }]
           };
-          console.log('[picturereader] intercepted read_image image block, replaced with text guidance');
         }
       }
     } catch (error) {

@@ -107,31 +107,90 @@ async function saveImageBytes(bytes, mediaType) {
   return path;
 }
 
-/** 读图（经 attachments）并做本地说明，返回一段文本证据（path 供工具续读）。 */
-async function analyzeImage(block, attachments) {
+/**
+ * Read one image through the attachment store and describe it in text.
+ *
+ * Two wordings: a pasted image is the user's own material, while an image
+ * arriving from a tool result (`read_image`) usually repeats a path the tool
+ * already printed, so the note points the model back at that file.
+ *
+ * @param {object} block - content block of type `image`.
+ * @param {object} attachments - attachment service.
+ * @param {{ fromToolResult?: boolean }} [options]
+ * @returns {Promise<string>} replacement text (never empty).
+ */
+async function analyzeImage(block, attachments, { fromToolResult = false } = {}) {
   let data;
   try {
     ({ data } = await attachments.readImage(block.attachment));
   } catch (e) {
-    return `[图片]（读取失败：${e?.message || e}），请用 image_scan 分析附件`;
+    return `[image omitted: the attachment could not be read (${e?.message || e}); use image_scan on the file]`;
   }
   const path = await saveImageBytes(data, block.attachment.mediaType);
-  return `[用户粘贴了一张图片]\n图片已导出到：${path}\n请先用 image_scan 分析该图片（如含文字再用 image_ocr），结合内容回答。`;
+  if (fromToolResult) {
+    return `[image omitted: this route reads images with local tools]\n`
+      + `The image is available at: ${path}\n`
+      + `Call image_scan on that path first (add image_ocr when it contains text).`;
+  }
+  return `[the user pasted an image]\nExported to: ${path}\n`
+    + `Analyze it with image_scan first (add image_ocr when it contains text), then answer.`;
 }
 
-/** 把消息里的 image block 替换成分析文本。 */
-async function sanitizeImages(ctx, messages) {
+/**
+ * Replace every image block with text, descending into nested tool results.
+ *
+ * `contentHasImage` (the harness helper the twin's guard uses) walks
+ * `tool-result.content`, so an image returned by `read_image` reaches that
+ * guard. A shallow walk here then found no top-level image, returned the
+ * messages untouched, and the downstream adapter rejected the whole request
+ * with UNSUPPORTED_CONTENT - which is exactly the failure this function
+ * exists to prevent.
+ *
+ * @param {readonly object[]} blocks - content blocks to rewrite.
+ * @param {object} attachments - attachment service.
+ * @param {boolean} fromToolResult - true inside a `tool-result` subtree.
+ * @returns {Promise<readonly object[]>} the original array when nothing changed.
+ */
+async function sanitizeBlocks(blocks, attachments, fromToolResult) {
+  let changed = false;
+  const next = [];
+  for (const block of blocks) {
+    if (block?.type === 'image') {
+      let text;
+      try {
+        text = await analyzeImage(block, attachments, { fromToolResult });
+      } catch (e) {
+        // Never forward the image itself: the downstream adapter rejects the
+        // whole request, and the image already sits in the durable log.
+        console.error('[picturereader] image sanitize failed:', e?.message || e);
+        text = `[image omitted: local analysis failed (${e?.message || e}); use image_scan on the file]`;
+      }
+      next.push({ type: 'text', text });
+      changed = true;
+      continue;
+    }
+    if (block?.type === 'tool-result' && Array.isArray(block.content)) {
+      const content = await sanitizeBlocks(block.content, attachments, true);
+      if (content !== block.content) {
+        next.push({ ...block, content });
+        changed = true;
+        continue;
+      }
+    }
+    next.push(block);
+  }
+  return changed ? next : blocks;
+}
+
+/** Replace image blocks in every message with local-reading guidance text. */
+export async function sanitizeImages(ctx, messages) {
   const attachments = ctx.get?.('attachments') ?? ctx.attachments;
   const next = [];
   for (const message of messages) {
     const content = message?.content;
-    if (!Array.isArray(content) || !content.some((b) => b?.type === 'image')) { next.push(message); continue; }
-    const blocks = [];
-    for (const block of content) {
-      if (block?.type !== 'image') { blocks.push(block); continue; }
-      blocks.push({ type: 'text', text: await analyzeImage(block, attachments) });
-    }
-    next.push({ ...message, content: blocks });
+    if (!Array.isArray(content)) { next.push(message); continue; }
+    const blocks = await sanitizeBlocks(content, attachments, false);
+    next.push(blocks === content ? message : { ...message, content: blocks });
   }
   return next;
 }
