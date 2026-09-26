@@ -18,10 +18,13 @@
  * platform-conditional OCR engine selector, because PaddleOCR is now the only
  * OCR engine and the project targets Linux only.
  *
- * Hand-written ModuleLoader bundle — no build step. scope.load() usage is
- * guarded (`typeof scope.load === "function"`) so the card runs on DSH hosts
- * without a scope load surface (EAC desktop shells) as well as those that
- * have one.
+ * Hand-written ModuleLoader bundle — no build step. The settings transport is
+ * `ctx.configForms` (DSH 0.1.7, served by @deepseek-ai/dsh-client-ui-settings);
+ * it replaced the `settingsScope` service of 0.1.6 and earlier, whose name the
+ * client boot would otherwise wait for forever ("pending: waiting for service:
+ * settingsScope"). scope.load() usage is guarded
+ * (`typeof scope.load === "function"`) so the card runs on DSH hosts without a
+ * scope load surface (EAC desktop shells) as well as those that have one.
  */
 window.__ModuleLoader__.load({
   id: "picturereader",
@@ -90,7 +93,7 @@ window.__ModuleLoader__.load({
 
     // ── locale ────────────────────────────────────────────────────────────
     var NS = "picturereader";
-    var inject = ["slots", "locale", "settingsScope"];
+    var inject = ["slots", "locale", "configForms"];
     var en = {
       nav: "Picture Reader",
       intro: "picturereader: local image understanding for text-only models. Pick a usage mode; check models to give them a vision variant; configure external vision endpoint (optional). Settings hot-apply, vision bridge requires DSH restart.",
@@ -557,7 +560,10 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       var t = ctx.locale.bind(NS);
       ctx.effect(function () { return ctx.locale.register(NS, { en: en }); }, "picturereader: dictionaries");
-      var scope = ctx.settingsScope.bind({ namespace: NS });
+      // The plugin's own entry id is its settings namespace; ConfigForms.get
+      // returns the shared form for that namespace (getSnapshot / subscribe /
+      // set / unset), the same surface settingsScope.bind used to hand back.
+      var scope = ctx.configForms.get(NS);
       ctx.slots.inject("settings.section", function () {
         return ctx.slots.register({
           name: "settings.section",

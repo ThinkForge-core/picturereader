@@ -54,3 +54,30 @@ export function resolveVlmApiKey(vlm) {
   }
   return '';
 }
+
+/**
+ * Unwrap a plugin Config into a plain object.
+ *
+ * DSH 0.1.7 delivers live Config fields as `Volatile` references: the plugin
+ * receives `config.mode.get()`, not `config.mode`, and the Loader updates those
+ * references in place when the settings card saves. Every consumer here reads
+ * plain values, so `apply()` resolves the top level once per read.
+ *
+ * The helper is deliberately total: a non-object Config yields `{}` (the
+ * callers then apply their own defaults), and a field without `.get()` — which
+ * is what every field looked like before 0.1.7 — passes through unchanged.
+ *
+ * @param {object} value - Config as received by `apply(ctx, config)`.
+ * @returns {object} the same keys with plain values.
+ */
+export function readConfig(value) {
+  if (value === null || typeof value !== 'object') return {};
+  const out = {};
+  for (const key of Object.keys(value)) {
+    const field = value[key];
+    out[key] = field !== null && typeof field === 'object' && typeof field.get === 'function'
+      ? field.get()
+      : field;
+  }
+  return out;
+}

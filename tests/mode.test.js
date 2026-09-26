@@ -11,7 +11,7 @@ import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import {
   MODES, normalizeMode, vlmAllowed, isPrivacy, visionAnalyzeDefaults, routePolicyText, routeModeTag,
 } from '../src/routing.js';
-import { modeOf, vlmConfigOf, resolveVlmApiKey, MODE_KEYS } from '../src/config.js';
+import { modeOf, vlmConfigOf, resolveVlmApiKey, readConfig, MODE_KEYS } from '../src/config.js';
 import { setRuntimeConfig, setRuntimeSource, getRuntimeConfig, currentMode, vlmAllowedByRuntime } from '../src/runtime.js';
 import { hasImageBlock, hasShaAttachmentReference, deepFreeze, bridgeMessages } from '../src/bridge.js';
 
@@ -72,6 +72,21 @@ test('resolveVlmApiKey: apiKey wins over the environment variable', () => {
   } finally {
     delete process.env.__PR_TEST_KEY__;
   }
+});
+
+test('readConfig unwraps volatile fields and leaves plain ones alone', () => {
+  // DSH 0.1.7 hands over Volatile references; every consumer here reads values.
+  const volatile = (value) => ({ get: () => value });
+  const config = readConfig({
+    mode: volatile('strict'),
+    vision_models: volatile([{ id: 'm', provider: 'p', note: '' }]),
+    vlm_timeout_ms: 1000, // a plain field (pre-0.1.7 host) still passes through
+  });
+  assert.equal(config.mode, 'strict');
+  assert.deepEqual(config.vision_models, [{ id: 'm', provider: 'p', note: '' }]);
+  assert.equal(config.vlm_timeout_ms, 1000);
+  assert.equal(readConfig(null).mode, undefined, 'a missing Config resolves to an empty object');
+  assert.deepEqual(readConfig(undefined), {});
 });
 
 test('runtime: setRuntimeConfig and the mode gate', () => {

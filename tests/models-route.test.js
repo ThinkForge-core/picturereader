@@ -53,8 +53,10 @@ function cachePath(home) {
  * Mount the plugin on a minimal writable context.
  *
  * Tool construction is not interesting here, so `effect` runs the callback but
- * tolerates anything it throws; only `webServer` and `settings`+`llm`
- * injections are answered.
+ * tolerates anything it throws; only `webServer` and `llm` injections are
+ * answered. The settings service is deliberately not answered at all: since
+ * DSH 0.1.7 the plugin's Config schema is its settings surface, so the host
+ * mount no longer injects `settings`.
  *
  * @param {{llm?: object, config?: object}} [options]
  * @returns {{ctx: object, routes: Array<{path: string, handler: Function}>, warnings: string[]}}
@@ -62,10 +64,6 @@ function cachePath(home) {
 function mountPlugin(options = {}) {
   const routes = [];
   const warnings = [];
-  const scope = {
-    get: () => options.config ?? {},
-    watch: () => {}
-  };
   const ctx = {
     effect(fn) {
       try {
@@ -76,6 +74,7 @@ function mountPlugin(options = {}) {
     },
     tools: { register: () => {} },
     logger: { warn: (m) => warnings.push(String(m)), info: () => {} },
+    on: () => {},
     inject(deps, cb) {
       if (deps.includes('webServer')) {
         cb({
@@ -85,11 +84,8 @@ function mountPlugin(options = {}) {
             }
           }
         });
-      } else if (deps.includes('settings') && deps.includes('llm')) {
-        cb({
-          settings: { register: () => scope },
-          llm: options.llm ?? { listProviders: () => [] }
-        });
+      } else if (deps.includes('llm')) {
+        cb({ llm: options.llm ?? { listProviders: () => [] } });
       }
       // `attachments` is deliberately left unanswered: the image bridge is not
       // under test and mounting it would drag in the real attachment service.

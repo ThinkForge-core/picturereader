@@ -17,8 +17,10 @@
  *  vision_analyze                             — 统一图像理解（按模式路由）
  *  document_to_image                          — 文档(pdf/word/excel/ppt)转图片
  *
- * Settings: host 侧把 `picturereader` 命名空间写入 DSH settings.yaml；client.js
- * 在 Web 设置页注册"图片阅读"卡片。mode / VLM 端点热加载。
+ * Settings: the plugin's profile entry (`picturereader`) carries the exported
+ * `Config` schema, so DSH's settings service exposes it and client.js registers
+ * the "Picture Reader" card in the Web settings page. Every editable field is
+ * volatile, so mode / VLM endpoint changes hot-apply without a host restart.
  *
  * @module picturereader
  */
@@ -29,7 +31,7 @@ import { registerMoreTools } from './more-tools.js';
 import { createImageBatchTool } from './image-batch.js';
 import { createDocumentToImageTool } from './doc-tools.js';
 import { createImageEditTool } from './image-edit.js';
-import { NS } from './config.js';
+import { readConfig } from './config.js';
 import z from '@deepseek-ai/schemastery';
 import { setRuntimeSource, getRuntimeConfig } from './runtime.js';
 import { attachImageBridge } from './bridge.js';
@@ -127,107 +129,136 @@ function imageReadingSkill() {
 
 export const name = 'picturereader';
 
-/** 设置命名空间的运行时 schema（schemastery）。 */
-const Config = z.object({
-  mode: z
+/**
+ * Mark one Config field as live-editable.
+ *
+ * `.volatile()` arrived in `@deepseek-ai/schemastery` 3.18.4, the version DSH
+ * 0.1.7 ships; the plugin's own dev checkout can still resolve an older copy,
+ * where the method does not exist. There the field stays plain instead of
+ * crashing the import — such a host simply exposes no live fields.
+ *
+ * @template T
+ * @param {T} field - schemastery field.
+ * @returns {T} the same field, volatile when the builder supports it.
+ */
+function live(field) {
+  return typeof field?.volatile === 'function' ? field.volatile() : field;
+}
+
+/**
+ * Runtime schema of the plugin's profile entry (schemastery).
+ *
+ * Exported, and every editable field is live (`live()`): on DSH 0.1.7 the
+ * Loader exposes a plugin entry's schema to the settings service through
+ * `fiber.runtime.Config`, and only volatile fields are editable and applied
+ * live (non-volatile ones are absent from the form, and a write to them is
+ * refused with "is not volatile"). The namespace is the row's own entry id
+ * (`picturereader`), which is also the key the browser half reads
+ * (`ConfigForms.get`).
+ *
+ * Because volatile fields arrive as `Volatile<T>` references, `apply()` hands
+ * the resolved object to the rest of the plugin through `readConfig()`.
+ */
+export const Config = z.object({
+  mode: live(z
     .string()
     .default('smart')
-    .description('Operating mode: privacy / smart / strict'),
-  vlm_enabled: z
+    .description('Operating mode: privacy / smart / strict')),
+  vlm_enabled: live(z
     .boolean()
     .default(false)
-    .description('Optional: enable the external vision API. Until this is checked no external endpoint is ever called and everything stays local.'),
+    .description('Optional: enable the external vision API. Until this is checked no external endpoint is ever called and everything stays local.')),
   vision_bridge_enabled: z
     .boolean()
     .default(false)
     .description('(Deprecated — use vision_models instead.)'),
-  vision_models: z
+  vision_models: live(z
     .array(z.object({
       id: z.string(),
       provider: z.string().default(''),
       note: z.string().default(''),
     }))
     .default([])
-    .description('Vision bridge models: each checked text model gets a "(vision)" variant.'),
-  vlm_base: z
+    .description('Vision bridge models: each checked text model gets a "(vision)" variant.')),
+  vlm_base: live(z
     .string()
     .default('')
-    .description('OpenAI-compatible vision endpoint URL (e.g. https://api.openai.com/v1; empty disables the external VLM).'),
-  vlm_model: z.string().default('gpt-4o-mini').description('Vision model name.'),
-  vlm_key: z.string().default('').role('secret').description('Vision API key (write-only; never read back or displayed).'),
-  vlm_key_env: z
+    .description('OpenAI-compatible vision endpoint URL (e.g. https://api.openai.com/v1; empty disables the external VLM).')),
+  vlm_model: live(z.string().default('gpt-4o-mini').description('Vision model name.')),
+  vlm_key: live(z.string().default('').role('secret').description('Vision API key (write-only; never read back or displayed).')),
+  vlm_key_env: live(z
     .string()
     .default('')
-    .description('Environment variable to fall back to when vlm_key is empty (e.g. VISUAL_API_KEY).'),
-  vlm_timeout_ms: z
+    .description('Environment variable to fall back to when vlm_key is empty (e.g. VISUAL_API_KEY).')),
+  vlm_timeout_ms: live(z
     .number()
     .default(300000)
-    .description('Advanced: external vision request timeout in milliseconds.'),
-  vlm_max_tokens: z
+    .description('Advanced: external vision request timeout in milliseconds.')),
+  vlm_max_tokens: live(z
     .number()
     .default(8192)
-    .description('Advanced: maximum output tokens for the external vision call.'),
-  bridge_export_dir: z
+    .description('Advanced: maximum output tokens for the external vision call.')),
+  bridge_export_dir: live(z
     .string()
     .default('')
-    .description('Advanced: image bridge export directory (empty = system temp directory).'),
-  max_image_bytes: z
+    .description('Advanced: image bridge export directory (empty = system temp directory).')),
+  max_image_bytes: live(z
     .number()
     .default(52428800)
-    .description('Advanced: maximum size of a single image in bytes (default 50 MB).'),
-  scan_default_size: z
+    .description('Advanced: maximum size of a single image in bytes (default 50 MB).')),
+  scan_default_size: live(z
     .number()
     .default(32)
-    .description('Advanced: default image_scan grid size (8..64).'),
-  scan_palette: z
+    .description('Advanced: default image_scan grid size (8..64).')),
+  scan_palette: live(z
     .string()
     .default('auto')
-    .description('Advanced: default image_scan palette (auto/full/basic/gray).'),
-  scan_mode: z
+    .description('Advanced: default image_scan palette (auto/full/basic/gray).')),
+  scan_mode: live(z
     .string()
     .default('auto')
-    .description('Advanced: default image_scan mode (auto/ascii/color).'),
-  ocr_language: z
+    .description('Advanced: default image_scan mode (auto/ascii/color).')),
+  ocr_language: live(z
     .string()
     .default('')
     .description('Advanced: default OCR language as a BCP-47 tag, which selects the PaddleOCR recognition model. ' +
       'Empty (or "auto") keeps the two-model default that ocr_priority orders. Another script needs its own tag ' +
-      '(ru for Russian, de for German, ar for Arabic, ...). A tag pins a single model and so switches ocr_priority off.'),
-  ocr_priority: z
+      '(ru for Russian, de for German, ar for Arabic, ...). A tag pins a single model and so switches ocr_priority off.')),
+  ocr_priority: live(z
     .string()
     .default('')
     .description('Advanced: model order for the two-model OCR default. "auto" or "zh" reads the CJK model first ' +
       '(better for a Chinese reader), "cyrillic" reads the East Slavic model first (better for a Russian reader). ' +
       'Both models still run; the order only decides which one wins when they disagree. ' +
-      'Only used while the OCR language is left at its two-model default.'),
-  multimodal_models: z
+      'Only used while the OCR language is left at its two-model default.')),
+  multimodal_models: live(z
     .string()
     .default('')
-    .description('Advanced: multimodal allowlist (comma separated). These models receive images directly without degradation.'),
-  request_guard: z
+    .description('Advanced: multimodal allowlist (comma separated). These models receive images directly without degradation.')),
+  request_guard: live(z
     .boolean()
     .default(true)
-    .description('Advanced: request guard — last-resort image block degradation on llm/stream.'),
-  batch_probe_first: z
+    .description('Advanced: request guard — last-resort image block degradation on llm/stream.')),
+  batch_probe_first: live(z
     .number()
     .default(3)
-    .description('Advanced: image_batch probes this many leading images to decide whether the batch is text-dense.'),
-  batch_ocr_limit_chars: z
+    .description('Advanced: image_batch probes this many leading images to decide whether the batch is text-dense.')),
+  batch_ocr_limit_chars: live(z
     .number()
     .default(800)
-    .description('Advanced: per-image OCR excerpt length in image_batch.'),
-  doc_dpi: z
+    .description('Advanced: per-image OCR excerpt length in image_batch.')),
+  doc_dpi: live(z
     .number()
     .default(150)
-    .description('Advanced: document_to_image render DPI (72..300).'),
-  doc_max_pages: z
+    .description('Advanced: document_to_image render DPI (72..300).')),
+  doc_max_pages: live(z
     .number()
     .default(50)
-    .description('Advanced: document_to_image maximum page count (1..500).'),
-  debug: z
+    .description('Advanced: document_to_image maximum page count (1..500).')),
+  debug: live(z
     .boolean()
     .default(false)
-    .description('Advanced: debug logging.'),
+    .description('Advanced: debug logging.')),
 });
 
 /** Services required at runtime. */
@@ -238,8 +269,9 @@ export function apply(ctx, config) {
   // （rc.2 时代 dsh-host-apiproxy 的 WEB_SETTINGS_NAMESPACES 白名单连同整个
   // apiproxy 包已被移除），本补丁退役；调用已删除（原 ensureSettingsNamespaceExposed）。
   // ── 运行时快照：工具执行时惰性读最新 mode / VLM 配置 ──
-  let sourceGetter = null;
-  const getConfig = () => (sourceGetter ? sourceGetter() : config);
+  // The Loader owns the entry config and updates volatile fields in place, so
+  // every read resolves the current values; nothing here is cached.
+  const getConfig = () => readConfig(config);
   setRuntimeSource(getConfig);
 
   // ── 注册工具（不需要 settings/llm 服务）──
@@ -297,15 +329,36 @@ export function apply(ctx, config) {
     ctx.logger?.warn?.(`[picturereader] image bridge disabled: ${String(error)}`);
   }
 
-  // ── 设置命名空间 + 模型扫描 + 视觉孪生路由（需要 settings 和 llm 服务）──
-  ctx.inject(['settings', 'llm'], (sctx) => {
+  // ── 抑制自动生成页面：本插件自带设置卡片（settings.section）──
+  // The settings service generates a generic page for every entry that carries
+  // a Config schema; this plugin ships its own card, so the generated one would
+  // duplicate every control. `configure` only changes presentation — the
+  // namespace stays served, which is what ConfigForms.get reads.
+  try {
+    ctx.inject(['settings'], (sctx) => {
+      if (typeof sctx.settings?.configure === 'function') {
+        sctx.settings.configure({ auto: false }, ctx.fiber);
+      }
+    });
+  } catch (error) {
+    ctx.logger?.warn?.(`[picturereader] settings presentation not configured: ${String(error)}`);
+  }
+
+  // ── 模型扫描 + 视觉孪生路由（llm 已在顶层 inject 中声明）──
+  ctx.inject(['llm'], (sctx) => {
     const llm = sctx.llm;
-    // 内核 0.1.2+ 起 dsh-settings 不再导出 settingsNamespace 品牌函数
-    // （命名空间校验收进 register() 内部，见内核 parseSettingsNamespace）。
-    // 直接把裸 NS 交给 register 即可，返回的 scope 仍具备 get/watch/update/replace。
-    const scope = sctx.settings.register(NS, Config, { base: config });
-    sourceGetter = () => scope.get();
-    scope.watch(() => { refreshTwinAdapters(ctx, llm, getConfig); /* 勾选模型热更新孪生包装 */ });
+    // DSH 0.1.7 removed the settings service's `register()`: a plugin's profile
+    // entry carries its own exported `Config` schema, and a settings save
+    // updates the volatile fields in place and publishes
+    // `loader/volatile-update`. Re-wrap the twin adapters on that event so a
+    // newly checked model gains its "(vision)" variant without a host restart.
+    ctx.on('loader/volatile-update', () => {
+      try {
+        refreshTwinAdapters(ctx, llm, getConfig);
+      } catch (error) {
+        ctx.logger?.warn?.(`[picturereader] twin refresh failed: ${String(error?.message || error)}`);
+      }
+    });
 
     // ── 扫描所有 provider 的文本模型 → 写入 available_text_models ──
     (async () => {
@@ -329,7 +382,7 @@ export function apply(ctx, config) {
         // 兜底：把用户已勾选的模型并入列表（即使某 provider 的模型扫描漏了，
         // 只要在 vision_models 里就应显示+打钩，与孪生保持一致）。
         try {
-          const cfg = scope.get();
+          const cfg = getConfig();
           const vms = Array.isArray(cfg?.vision_models) ? cfg.vision_models : [];
           for (const entry of vms) {
             const id = typeof entry === 'string' ? entry : entry?.id;
