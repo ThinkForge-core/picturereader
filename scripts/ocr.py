@@ -212,6 +212,25 @@ def plan_tiles(
     return tiles
 
 
+def is_empty_detection(exc: BaseException) -> bool:
+    """True when the engine found no text at all in the tile.
+
+    RapidOCR raises ``RapidOCRError("The text detection result is empty")`` out
+    of ``detect_and_crop`` instead of returning an empty result, so the
+    ``det.boxes is None`` guard in ``run_tile`` is never reached. An empty
+    detection is a legitimate answer, not a failure: ``image_ocr`` may be
+    pointed at a blank margin on purpose, and the PaddleOCR path answered the
+    same input with zero lines.
+
+    The class name and the message are both matched, because ``rapidocr`` has
+    moved this error between modules across releases and importing it here
+    would tie the script to one layout.
+    """
+    if type(exc).__name__ != "RapidOCRError":
+        return False
+    return "detection result is empty" in str(exc)
+
+
 # --------------------------------------------------------------------------
 # the engine
 # --------------------------------------------------------------------------
@@ -307,7 +326,12 @@ class OcrEngine:
 
         ori_h, ori_w = rgb.shape[:2]
         img, op_record = self.primary.preprocess_img(rgb)
-        crops, det = self.primary.detect_and_crop(img, op_record)
+        try:
+            crops, det = self.primary.detect_and_crop(img, op_record)
+        except Exception as exc:
+            if is_empty_detection(exc):
+                return []
+            raise
         if det.boxes is None or len(crops) == 0:
             return []
         if map_boxes_to_original is not None:
