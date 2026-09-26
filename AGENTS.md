@@ -10,7 +10,14 @@ This checkout is the **fork** `ThinkForge-core/picturereader` of
 `jing-hy/picturereader`, and it is a different product rather than a staging
 area: Linux and Termux only, an English-only user surface, and a DSH 0.1.7 host
 API. What that means for merges, and which of the other repository's changes
-must not come back, is in "Fork, upstream and merges" below.
+must not come back, is in `references/upstream-and-merges.md`.
+
+## Where to look
+
+| Topic | Reference |
+|---|---|
+| upstream sync, fork divergence, the merge recipe, installing a copied tarball | `references/upstream-and-merges.md` |
+| test suites, engine-backed skips, fixture rules, the venv caveat | `references/tests.md` |
 
 ## Hard rules
 
@@ -34,6 +41,7 @@ must not come back, is in "Fork, upstream and merges" below.
   profile just to "check" something — they create venvs and rewrite
   `$DSH_HOME/profiles/*/package.json`. Use `--dry-run`, `--selftest` or
   `--verify` for a read-only answer unless the task really is an install.
+
 
 ## Branches
 
@@ -63,86 +71,6 @@ PREFIX=/data/data/com.termux/files/usr npm test
 `src/platform-profile.js` keys off exactly that variable (`isTermux()`), which is
 also what withholds the three `image_edit` actions the device cannot run.
 
-## Fork, upstream and merges
-
-`origin` is the fork (`ThinkForge-core/picturereader`, public, used as an
-off-machine backup), `upstream` is the author's repository, and `linux` is the
-line that ships. The `git-github-ssh` skill carries the general
-procedure (its upstream-synchronisation section); what this repository adds is
-below.
-
-Fork commits are not upstream candidates - the two are different products - and
-the working agreement for this checkout is not to open pull requests at all.
-Work is finished by a local commit.
-
-### The version number does not say who is ahead
-
-Both repositories cut a `3.4.0` from the same parent (`bea02b1`) without seeing
-each other: upstream's 3.4.0 is "native vision awareness", this fork's is
-"RapidOCR + Termux". The fork has since moved to 3.4.2, so upstream can report a
-*lower* version while carrying work this checkout does not have. Compare
-`git log`, never the manifest.
-
-### What diverges, and why it must survive a merge
-
-| Area | What this fork does | Why a merge must not revert it |
-|---|---|---|
-| Platforms | Linux and Termux/Android only. The two non-Linux OCR engines (Apple Vision and the Microsoft built-in one), the `scripts/setup-*.mjs` helpers and the platform-conditional engine options are deleted (`c09317c`). | `tests/portability.test.js` fails the suite on the first platform word anywhere in the tree. |
-| OCR | RapidOCR is the only engine and the default: ONNX Runtime, tiling so long screenshots are never downscaled, two recognition models with a configurable tie-break, a thread cap for phone-class hosts (`9eead39`, `20bcd5f`, `43f0db9`, `94316b1`). | PaddleOCR cannot be installed on aarch64 at all, which is what the Termux branch is for. |
-| Language | An English-only user surface: `README.md`, `client.js`, `skills/*`. | The same guard fails on the first CJK character in those files. **This is why upstream's `zh` dictionary in `client.js` is dropped on every merge instead of being kept.** |
-| DSH version | Targets 0.1.7-rc.2: the entry exports `Config`, every editable field is `live()` (`.volatile()`), values are resolved through `readConfig()`, and the browser half injects `configForms` (`fca0b98`). | 0.1.7 deleted `settings.register` and renamed `settingsScope`; the older shape does not load here at all. |
-| Live ctx | Services are reached only through `inject`; `hostLlm()` in `src/bridge.js` exists for the single place a service is wanted outside a declared injection. | The live ctx is a Cordis proxy that throws on any undeclared public property. Upstream resolves the llm service as `ctx.get?.('llm') ?? ctx.llm`, which would take down every `llm/stream` call on this host. |
-| Branches | `linux` is the primary line; `termux` is `linux` plus one README/setup commit. | Keeps the tablet delta a merge rather than a cherry-pick. |
-
-### Merge recipe
-
-Upstream ships fixes worth having, and upstream is written against a DSH that no
-longer exists, so resolve by hand: never `-X theirs`, and never "take upstream's
-file" for `client.js`, `README.md`, `package.json` or `src/index.js`.
-
-```sh
-git fetch upstream
-git log --oneline HEAD..upstream/main     # what they have and we do not
-git log --oneline upstream/main..HEAD     # our divergence - this is what conflicts
-git merge upstream/main
-```
-
-Four conflict classes recur, and each has one answer:
-
-1. **Settings surface** - anything upstream registers through a `settings` scope
-   becomes an exported, `live()`-marked `Config` field read through `readConfig()`.
-2. **Service access** - `ctx.<service>` or `ctx.get(...)` in upstream code becomes
-   an `inject` entry, or a best-effort accessor like `hostLlm()`.
-3. **Language** - upstream's CJK comments: keep the code, write the comment in
-   English. CJK strings leave the user-facing files entirely.
-4. **Platforms** - upstream's non-Linux branches and `setup-*.mjs` references are
-   deleted, not merged.
-
-Then verify, and only then hand the artifact to the profile:
-
-```sh
-npm test                                  # must be 0 failures
-npm pack --cache .npmcache-local          # ~/.npm is not writable in the sandbox
-dsh plugin --profile web add file:$PWD/picturereader-<version>.tgz
-# restart the `dsh web` process before expecting the new host half to load
-```
-
-### Install a copied tarball, never a symlink to this checkout
-
-The profile has to take the packed `.tgz`. A `link:` to this checkout brings its
-own `node_modules` along, and therefore a second `@deepseek-ai/schemastery`; if
-the version that resolves first lacks `Schema.volatile()`, `live()` degrades to a
-plain field, `Config` ends up with no volatile field at all, the settings service
-never publishes the namespace, and the card reports "Settings namespace
-unavailable (picturereader not registered server-side?)" while everything else
-looks healthy. Confirm the schema before blaming the host:
-
-```sh
-node --input-type=module -e "import { Config } from './src/index.js'; const d = Config.dict; console.log(Object.keys(d).filter(k => !d[k]?.meta?.volatile))"
-```
-
-The only field allowed to print is `vision_bridge_enabled`: it is deprecated,
-unreferenced, and deliberately not volatile.
 
 ## Layout
 
@@ -162,6 +90,7 @@ unreferenced, and deliberately not volatile.
 | `client.js` | Web settings card (browser bundle, rebuilt separately from the host). |
 | `tests/` | `node:test` suites; `tests/fixtures.mjs` builds deterministic images in memory. |
 
+
 ## Commands
 
 ```sh
@@ -173,6 +102,7 @@ python3 scripts/install.py --selftest     # installer's own self-test
 python3 scripts/uninstall.py --dry-run    # component inventory and sizes
 node scripts/preview.mjs                  # regenerate fixtures and preview the rendering
 ```
+
 
 ## What is live, and what needs a host restart
 
@@ -190,6 +120,7 @@ Practical consequence for verification: the test suite exercises the sources
 you just edited, but a *live* tool call in a running session still runs the old
 code. Either restart the host, or drive the factory out of process with a ctx
 that mimics the live one (see the seam note below).
+
 
 ## Two failure classes that must not regress
 
@@ -225,37 +156,6 @@ does not). `image_edit` shipped `width: result.width ?? null` and
 - Cover it with a test that asserts no value is `null`/`undefined` and that the
   object round-trips through `JSON.parse(JSON.stringify(...))`.
 
-## Tests
-
-- Framework: `node:test` + `node:assert/strict`. No extra runner, no mocks
-  library — the suites build small fake `ctx` objects with an in-memory `fs`.
-- Engine-backed tests gate on the venv and **skip** rather than fail:
-  `RAPID_READY` (`$DSH_HOME/picturereader/venvs/ocr`) for the default engine,
-  `PADDLE_READY` (`.../venvs/paddle`) for the legacy `runPaddleOcr` primitive.
-  `ocrFile` and `ocrImage` both resolve the engine through `ocrEngine()`, so
-  they need *an* engine, not a specific one. Keep that property when adding
-  tests.
-- The RapidOCR venv ships only the `ch` and `eslav` recognition models plus the
-  detectors. A test that names another language (`en`, `ja`, ...) triggers a
-  model download and fails on a read-only or offline host — stick to the bundled
-  keys, or assert on the resolved model key rather than a BCP-47 tag.
-- Report what the engine actually returns. `image_ocr` reports the resolved
-  **model keys** (`eslav`, `ch+eslav`), not the tag the caller passed (`ru`).
-- Never name a **platform-gated** `image_edit` action directly. Under Termux
-  `availableEditActions` removes `remove_background` / `raw_convert` / `upscale`
-  from the tool enum, so a test that calls one fails with "action is not
-  available here". Filter by the tool's own enum
-  (`createImageEditTool({}).parameters.properties.action.enum`) instead, as
-  `tests/image-edit.test.js` does for the timeout table. Verify with
-  `PREFIX=/data/data/com.termux/files/usr npm test`.
-- Assert a backend error on an action that exists on every platform: matching
-  `/rembg/` in an error test passes under Termux by accident, because the
-  platform gate throws a message that also contains "rembg".
-- Keep fixtures deterministic (`tests/fixtures.mjs`) and never depend on a live
-  network or on `~/.dsh` being writable.
-- The Python venvs live outside the repository. In a write-sandboxed session
-  they are readable but not writable, which surfaces as
-  `[Errno 30] Read-only file system` when something tries to download a model.
 
 ## Python backends
 
@@ -267,6 +167,7 @@ does not). `image_edit` shipped `width: result.width ?? null` and
 - JS never imports Python; it spawns the resolved interpreter with a request
   file and parses stdout. Keep the wire format backward compatible or update
   both sides in the same change.
+
 
 ## Adding or changing a tool
 
