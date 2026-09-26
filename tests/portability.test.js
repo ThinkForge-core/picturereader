@@ -32,6 +32,19 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 /** Directories that never contain project source. */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'fixtures-out', '.npmcache-local', '__pycache__']);
 
+/**
+ * Generated dependency graphs, which are not project source either.
+ *
+ * This checkout installs with npm (`package-lock.json` is the tracked
+ * lockfile), but `pnpm install` is an ordinary thing to run in a JavaScript
+ * project and leaves a `pnpm-lock.yaml` beside it. That file resolves a package
+ * for every platform a dependency ships a binary for, so it contains
+ * `os: [darwin]` and used to fail the platform guard on a file no one wrote by
+ * hand. The npm lockfile is skipped for the same reason, not because it
+ * currently offends.
+ */
+const SKIP_FILES = new Set(['pnpm-lock.yaml', 'package-lock.json', 'npm-shrinkwrap.json']);
+
 /** File extensions we scan. */
 const SCAN_EXTENSIONS = ['.js', '.mjs', '.py', '.json', '.yml', '.yaml', '.md', '.swift'];
 
@@ -103,7 +116,7 @@ const LOCAL_ONLY_FILES = new Set(['AGENTS.local.md', 'CLAUDE.local.md']);
  */
 function collect(dir, out = []) {
   for (const entry of readdirSync(dir)) {
-    if (SKIP_DIRS.has(entry)) continue;
+    if (SKIP_DIRS.has(entry) || SKIP_FILES.has(entry)) continue;
     const full = join(dir, entry);
     const info = statSync(full);
     if (info.isDirectory()) {

@@ -20,3 +20,7 @@ __pycache__/
 
 # throwaway environments created by ad-hoc install runs
 .pr-*/
+
+# this checkout installs with npm (package-lock.json is the tracked lockfile);
+# a pnpm lockfile is a local by-product, not something the repository ships
+pnpm-lock.yaml
