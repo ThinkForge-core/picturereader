@@ -296,6 +296,33 @@ function needsLocalReading(getConfig, provider, model, messages) {
   return (messages ?? []).some((msg) => contentHasImage(msg?.content));
 }
 
+/**
+ * Unwrapped adapter for one provider, used to read model capabilities.
+ *
+ * A twin wraps the checked models in a Proxy that rewrites inputModalities to
+ * ["text", "image"], so llm.listModels()/llm.resolveModel() cannot answer
+ * "does this model really see images?" - a pseudo-vision twin would be read as
+ * native vision. This bypasses the twin:
+ *  - the provider's original adapter is recorded in twinState.wrapped -> use it;
+ *  - the current adapter is someone else's proxy (it carries
+ *    __picturereaderTwin but this module did not make it) -> null, and the
+ *    caller must treat the capability as unknown rather than guess.
+ * @param {object} llm - host llm service (registration).
+ * @param {string} provider - provider route key.
+ * @returns {object|null} the original adapter, or null when it cannot be read.
+ */
+export function realAdapterOf(llm, provider) {
+  if (!llm || !provider) return null;
+  const unwrapped = twinState?.wrapped?.get(provider);
+  if (unwrapped) return unwrapped;
+  let reg;
+  try { reg = llm.registration(provider); } catch { return null; }
+  const adapter = reg?.adapter;
+  if (!adapter) return null;
+  if (adapter.__picturereaderTwin) return null;
+  return adapter;
+}
+
 /** 若 provider 当前 adapter 尚未被包装（非孪生 proxy），则包装之。 */
 function wrapProvider(state, ctx, llm, provider, getConfig) {
   let reg;

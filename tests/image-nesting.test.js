@@ -18,6 +18,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 
 import { hasImageBlock, contentHasImageBlock, bridgeMessages, attachImageBridge } from '../src/bridge.js';
 import { setRuntimeConfig } from '../src/runtime.js';
+import { VERDICTS, noteActiveModel, setCapability } from '../src/vision-capability.js';
 
 // The twin resolves its export directory at module load, so DSH_HOME must point
 // at a scratch directory before the module is evaluated.
@@ -114,6 +115,12 @@ const readImageResult = {
 
 test('post-execute: a read_image image is replaced by a real decision', async () => {
   setRuntimeConfig({ mode: 'smart', request_guard: true, multimodal_models: '' });
+  // The rewrite is now gated on the capability verdict: only a model confirmed
+  // to be text-only has its image taken away (see the pass-through cases below).
+  // The route is pinned the way the harness pins it, through the active-model
+  // tracker, because the guard reads the verdict off that pair.
+  noteActiveModel('deepseek-official', 'deepseek-v4-flash');
+  setCapability('deepseek-official', 'deepseek-v4-flash', VERDICTS.textOnly, 'test');
   const guard = postExecuteGuard();
   let nextCalls = 0;
   const decision = await guard(readImageExec('deepseek-v4-flash'), readImageResult, async () => {
@@ -125,6 +132,35 @@ test('post-execute: a read_image image is replaced by a real decision', async ()
   assert.ok(Array.isArray(decision.content), 'an accept decision carries the replacement content');
   assert.ok(decision.content[0].text.includes('image_scan'), 'the model is pointed at the local tools');
   assert.equal(decision.content.some((b) => b.type === 'image'), false, 'the image is gone from the log copy');
+});
+
+test('post-execute: a natively sighted model keeps its image', async () => {
+  setRuntimeConfig({ mode: 'smart', request_guard: true, multimodal_models: '' });
+  noteActiveModel('deepseek-official', 'deepseek-v4-flash');
+  setCapability('deepseek-official', 'deepseek-v4-flash', VERDICTS.native, 'test');
+  const guard = postExecuteGuard();
+  let nextCalls = 0;
+  const decision = await guard(readImageExec('deepseek-v4-flash'), readImageResult, async () => {
+    nextCalls += 1;
+    return { kind: 'accept' };
+  });
+  assert.equal(nextCalls, 1, 'a route that can see the picture is not rewritten');
+  assert.equal(decision.content, undefined, 'the tool result is left alone');
+});
+
+test('post-execute: an unknown verdict leaves the image alone', async () => {
+  setRuntimeConfig({ mode: 'smart', request_guard: true, multimodal_models: '' });
+  const guard = postExecuteGuard();
+  let nextCalls = 0;
+  // 'deepseek-official/never-probed' has no verdict at all: neither confirmed
+  // text-only nor declared native. Forwarding the image is the safer mistake.
+  noteActiveModel('deepseek-official', 'never-probed');
+  const decision = await guard(readImageExec('never-probed'), readImageResult, async () => {
+    nextCalls += 1;
+    return { kind: 'accept' };
+  });
+  assert.equal(nextCalls, 1, 'an unknown capability is not treated as text-only');
+  assert.equal(decision.content, undefined, 'the tool result is left alone');
 });
 
 test('post-execute: a whitelisted multimodal model keeps its image', async () => {

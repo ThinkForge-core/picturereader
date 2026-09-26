@@ -22,6 +22,15 @@ import { join, basename } from 'node:path';
 import os, { homedir } from 'node:os';
 import { getRuntimeConfig } from './runtime.js';
 import { routePolicyText, routeModeTag } from './routing.js';
+import {
+  VERDICTS,
+  activeModel,
+  capabilityOf,
+  isDeclaredNative,
+  noteActiveModel,
+  seedCapabilityFromAdapter,
+} from './vision-capability.js';
+import { realAdapterOf } from './picturereader-vision.mjs';
 
 const EXT_BY_MEDIA = {
   'image/png': '.png',
@@ -235,6 +244,28 @@ export async function bridgeMessages(messages, ctx, dir, { attachmentObjectsDir 
 }
 
 /**
+ * The host llm service, or undefined when this context cannot reach it.
+ *
+ * The live ctx is a Cordis proxy: reading a public property the plugin did not
+ * declare through `inject` throws "cannot get property ... without inject", so
+ * it must never be read bare. Cold-start capability seeding is best-effort
+ * anyway - the startup scan in `apply()` is what normally fills the cache - so
+ * an unreachable service is not an error worth failing a turn over.
+ *
+ * @param {object} ctx - Cordis context.
+ * @returns {object|undefined} the llm service when it can be read.
+ */
+function hostLlm(ctx) {
+  try {
+    if (typeof ctx?.get === 'function') {
+      const viaGet = ctx.get('llm');
+      if (viaGet) return viaGet;
+    }
+  } catch { /* the proxy refuses services this context did not inject */ }
+  try { return ctx?.llm ?? undefined; } catch { return undefined; }
+}
+
+/**
  * 注册图片桥（agent/pre-step 桥 + llm/stream 兜底 + read_image 拦截）。
  * @param {object} ctx - Cordis 上下文（inject: tools/llm/attachments）。
  * @param {() => object} 未使用 getConfig —— mode 从 runtime 读，保持实时。
@@ -250,6 +281,17 @@ export function attachImageBridge(ctx) {
   ctx.on('llm/stream', (options, next) => {
     const hasImage = hasImageBlock(options?.messages);
     const hasShaAttachment = hasShaAttachmentReference(options?.messages);
+    // 记录"当前模型"（系统提示词 section 的同步取值来源之一）；能力缓存尚未
+    // 命中时用**未包装的原始 adapter** 异步补种，下一轮生效。
+    const activeProvider = options?.provider || '';
+    const activeModelId = options?.model || '';
+    if (activeModelId) {
+      noteActiveModel(activeProvider, activeModelId);
+      if (capabilityOf(activeProvider, activeModelId) === undefined) {
+        const llm = hostLlm(ctx);
+        void seedCapabilityFromAdapter(realAdapterOf(llm, activeProvider), activeProvider, activeModelId);
+      }
+    }
     if (debug) {
       console.log('[picturereader] llm/stream fired, model=', options?.model, 'hasImage=', hasImage, 'hasShaAttachment=', hasShaAttachment, 'messagesCount=', options?.messages?.length);
       if (hasImage || hasShaAttachment) {
@@ -263,11 +305,23 @@ export function attachImageBridge(ctx) {
         const guardOn = rt?.requestGuard !== false;
         const multimodal = rt?.multimodalModels || [];
         const model = options?.model || '';
-        const inWhitelist = multimodal.includes(model);
+        const provider = options?.provider || '';
+        const autoNative = rt?.nativeVisionAuto !== false;
+        // 底层元数据判定为原生识图（含用户白名单声明）→ 图片直通该模型，不再
+        // 降级成"请用 image_scan"的文本，否则与提示词自相矛盾。
+        // 关掉 native_vision_auto 即回退到"只看 multimodal_models 白名单"的旧行为。
+        const passThrough = autoNative
+          ? isDeclaredNative(provider, model, multimodal)
+          : multimodal.includes(model);
+        // 只有真正的 image block 才直通：若内核已把图片降级成 "attachment
+        // sha256..." 文本引用（说明内核按 text-only 处理该请求），即便我们判定
+        // 原生识图也仍走降级路径，把附件恢复成可读文件路径——否则模型既拿不到
+        // 图、也拿不到路径。
+        const passThroughImages = passThrough && hasImage;
 
-        if (debug) console.log('[picturereader] Bridge config:', { guardOn, inWhitelist, hasImage, hasShaAttachment, mode: rt?.mode });
+        if (debug) console.log('[picturereader] Bridge config:', { guardOn, passThrough, passThroughImages, autoNative, hasImage, hasShaAttachment, mode: rt?.mode });
 
-        if (guardOn && !inWhitelist && (hasImage || hasShaAttachment)) {
+        if (guardOn && !passThroughImages && (hasImage || hasShaAttachment)) {
           const exportDir = (rt?.bridge?.exportDir || '').trim() || join(os.tmpdir(), 'picturereader-bridge');
           if (debug) console.log('[picturereader] Processing images, exportDir:', exportDir);
           const before = options.messages.reduce((n, m) => n + (Array.isArray(m?.content) ? m.content.filter(b => b?.type === 'image').length : 0), 0);
@@ -282,7 +336,7 @@ export function attachImageBridge(ctx) {
             if (debug) console.log('[picturereader] Messages not changed, using original');
           }
         } else {
-          if (debug) console.log('[picturereader] Skipping image processing:', { guardOn, inWhitelist, hasImage, hasShaAttachment });
+          if (debug) console.log('[picturereader] Skipping image processing:', { guardOn, passThrough, passThroughImages, hasImage, hasShaAttachment });
         }
       } catch (error) {
         console.log('[picturereader] llm/stream downgrade failed:', String(error && error.message || error));
@@ -299,11 +353,23 @@ export function attachImageBridge(ctx) {
         // The harness contract is a PostToolDecision: `next()` returns
         // `{ kind: 'accept' }`, so a replaced local variable used to be dropped
         // and the image stayed in the durable log forever. Return the decision.
+        //
+        // Only a model confirmed to be text-only is rewritten. A natively
+        // sighted model, a model the user whitelisted, and a model whose
+        // metadata is unknown all keep the image: taking a picture away from a
+        // model that can see it is worse than forwarding one it cannot.
         const rt = getRuntimeConfig();
         const guardOn = rt?.requestGuard !== false;
-        const multimodal = rt?.multimodalModels || [];
-        const model = exec.agent?.session?.requestHeader?.()?.config?.model ?? '';
-        if (guardOn && !multimodal.includes(model)) {
+        const whitelist = rt?.multimodalModels || [];
+        const tracked = activeModel();
+        const provider = tracked?.provider || '';
+        const model = tracked?.model
+          || exec.agent?.session?.requestHeader?.()?.config?.model
+          || '';
+        const declaredNative = rt?.nativeVisionAuto !== false && model !== ''
+          && isDeclaredNative(provider, model, whitelist);
+        const verdict = model === '' ? undefined : capabilityOf(provider, model);
+        if (guardOn && !declaredNative && verdict === VERDICTS.textOnly) {
           const filePath = exec.arguments?.file_path || 'the image file';
           console.log('[picturereader] intercepted read_image image block, replaced with text guidance');
           return {
@@ -314,6 +380,7 @@ export function attachImageBridge(ctx) {
             }]
           };
         }
+        if (rt?.debug === true) console.log('[picturereader] read_image image block passed through:', { provider, model, verdict });
       }
     } catch (error) {
       console.log('[picturereader] tools/post-execute intercept failed:', String(error && error.message || error));

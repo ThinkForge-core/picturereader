@@ -128,6 +128,7 @@ window.__ModuleLoader__.load({
       ocrPriority: "OCR model order in auto mode (auto | zh | cyrillic)",
       ocrPriorityHint: "Used only while the OCR default language above is empty or \"auto\". Both models still run; this order only decides which one wins a disagreement. Unknown words fall back to auto.",
       multimodalModels: "Multimodal whitelist (comma-separated, receive images directly)",
+      nativeVisionAuto: "Auto-detect native vision from model metadata (inputModalities has image: prompt discourages image_scan while image_ocr stays valid; pasted images pass through un-downgraded)",
       requestGuard: "Request guard (image block downgrade fallback)",
       batchProbeFirst: "Batch probe first N images",
       batchOcrLimitChars: "Batch OCR truncation chars",
@@ -170,6 +171,7 @@ window.__ModuleLoader__.load({
       { key: "ocr_language", type: "text", advanced: true, labelKey: "ocrLanguage", hintKey: "ocrLanguageHint" },
       { key: "ocr_priority", type: "text", advanced: true, labelKey: "ocrPriority", hintKey: "ocrPriorityHint" },
       { key: "multimodal_models", type: "text", advanced: true, labelKey: "multimodalModels" },
+      { key: "native_vision_auto", type: "checkbox", advanced: true, labelKey: "nativeVisionAuto" },
       { key: "request_guard", type: "checkbox", advanced: true, labelKey: "requestGuard" },
       { key: "batch_probe_first", type: "number", advanced: true, labelKey: "batchProbeFirst" },
       { key: "batch_ocr_limit_chars", type: "number", advanced: true, labelKey: "batchOcrLimitChars" },
@@ -182,6 +184,7 @@ window.__ModuleLoader__.load({
       vlm_timeout_ms: "vlmTimeoutMs", vlm_max_tokens: "vlmMaxTokens", bridge_export_dir: "bridgeExportDir",
       max_image_bytes: "maxImageBytes", scan_default_size: "scanDefaultSize", scan_palette: "scanPalette",
       scan_mode: "scanMode", ocr_language: "ocrLanguage", ocr_priority: "ocrPriority", multimodal_models: "multimodalModels",
+      native_vision_auto: "nativeVisionAuto",
       request_guard: "requestGuard", batch_probe_first: "batchProbeFirst", batch_ocr_limit_chars: "batchOcrLimitChars",
       doc_dpi: "docDpi", doc_max_pages: "docMaxPages", debug: "debug",
     };

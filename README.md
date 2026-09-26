@@ -1,7 +1,8 @@
 # picturereader
 
-> **v3.4.1 · Linux-only** — full "see images / read documents / edit photos" capability for text-only LLMs such as DeepSeek.
+> **v3.4.2 · Linux-only** — full "see images / read documents / edit photos" capability for text-only LLMs such as DeepSeek.
 > It combines a **visual twin adapter** (wraps any text-only model in place so DSH treats it as image-capable → native thumbnails plus automatic image analysis), **three-mode routing** (privacy / smart / strict), a **local pixel-level toolchain** (scan / RapidOCR / crop / palette / compare / batch), **document to image** (pdf / word / excel / ppt), a **local image editor `image_edit`** (Pillow + OpenCV, pure CPU: resize / rotate / filters / composite / watermark / background removal / upscale and more) and an **optional external VLM bridge**. One plugin, the whole chain.
+> New in v3.4.2: **native vision awareness** — a model that already sees images is recognised from its capability metadata, and the prompt and image path get out of its way instead of forcing the local toolchain on it (see [Native vision awareness](#7-native-vision-awareness-v342)).
 
 [![dsh-plugin](https://awesome-dsh-plugin.com/badge.svg)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) [![dsh.so security](https://www.dsh.so/badge/picturereader.svg)](https://www.dsh.so/artifact/picturereader) [![dsh.so install](https://www.dsh.so/badge/install/picturereader.svg)](https://www.dsh.so/artifact/picturereader)
 
@@ -138,11 +139,23 @@ Converts **pdf / docx / doc / xlsx / xls / pptx / ppt** page by page into PNG (L
 
 The Web settings page registers an "Image reading" card in the settings-panel design language (grouped cards, pill buttons, collapsible advanced section) with the usage mode, the external vision API, the vision-bridge model multi-select and the advanced settings (see [Settings card fields](#settings-card-fields)). Changes are written to `~/.dsh/settings.yaml` and take effect immediately.
 
-### 7. Paste an image and go
+### 7. Native vision awareness (v3.4.2)
+
+Some models in the catalog see images by themselves, and the local toolchain is a *replacement* for models that cannot. Pointing it at a model with a working vision encoder only makes the answer slower and less accurate, so the plugin reads the model's own capability metadata and adapts both the prompt and the image path to it.
+
+- **The verdict comes from the same metadata the harness gates on.** The plugin reads `inputModalities` from the provider's adapter and keeps three states: an explicit `image` entry means **native**, an explicit list without it means **text-only**, and a missing field means **unknown** — on unknown, nothing is injected and nothing changes.
+- **Prompt.** A dynamic section (`picturereader:image-capability`, order `3000`) registers through `ctx.systemPrompt.section()`. For a native model it says not to reach for `image_scan` / `image_sample`: they downsample the picture into a pixel grid and throw detail away. `image_ocr` stays the right tool even then, because native vision hallucinates small, low-resolution, glowing or stylized characters, and the five-step scanning workflow of the `image-reading` skill no longer applies.
+- **Image pass-through.** When the model is natively capable, or is listed in `multimodal_models`, the `llm/stream` bridge stops downgrading image blocks and a `read_image` result is no longer replaced with a text explanation.
+- **A native vision model needs no twin.** The vision-bridge multi-select only offers models that do **not** declare image input, because a native model already produces thumbnails and analysis on its own.
+- **The twin cannot fake it.** Capability is read through `realAdapterOf()`, the *unwrapped* adapter. The twin rewrites a checked model's `inputModalities` to `['text','image']`, so reading `llm.listModels()` would mistake a pseudo-vision twin for real native vision.
+- **Which model is active** is tracked in three layers: `system-prompt/assemble` (`variables.provider` / `variables.model`, written by the harness every turn) → an agent-level cache (`WeakMap`, so sessions and subagents do not pollute each other) → `llm/stream` as the last resort. A model switch is picked up by the next turn at the latest.
+- **Off switch.** The advanced `native_vision_auto` field (default `true`). Unchecked, the prompt section and the pass-through both return to the whitelist-only behaviour.
+
+### 8. Paste an image and go
 
 With the visual twin enabled and a "(vision)" model variant selected: paste or drag in an image → native thumbnail → image block enters the conversation → intercepted by the twin `stream` hook → exported as a text path plus local evidence → the text-only model gets the result and can keep digging with `image_scan` / `image_ocr`.
 
-### 8. Local image editor — `image_edit`
+### 9. Local image editor — `image_edit`
 
 A single tool dispatching many actions, backed by the installer-managed `media` Python environment (Pillow + OpenCV-headless, plus the optional rembg / rawpy / realesrgan CLI), **pure CPU, no GPU and no large models**. Image bytes never leave the machine.
 
@@ -347,6 +360,8 @@ python3 scripts/uninstall.py --json
 
 ## Enabling the visual twin (native thumbnails)
 
+The list only offers models that do **not** declare image input: a natively sighted model needs no twin, because it already produces thumbnails and answers from the pixels itself (see [Native vision awareness](#7-native-vision-awareness-v342)).
+
 1. In the "Image reading" settings card, check the text-only models that should get a visual twin, then save and **restart DSH**.
 2. In the model picker, choose the "(vision)" variant of that model (for example `deepseek-v4-flash (vision)`).
 3. Paste or drag in an image → native thumbnail → the image block is analyzed automatically into textual evidence.
@@ -398,6 +413,7 @@ The card follows the settings-panel design language (grouped cards / pill button
 | `ocr_language` | empty | Default OCR language, as a BCP-47 tag (e.g. `ru`, `en-US`, `zh-Hans`) or a RapidOCR model key (e.g. `eslav`, `cyrillic`, `latin`), selecting the recognition model. Leave empty for the two-model default (Chinese/English + East Slavic); see the OCR languages table above. |
 | `ocr_priority` | empty (`auto`) | Which recognition model the two-model default asks first, and therefore which one wins a tie: `auto`/`zh` (CJK model first — better for a Chinese reader) or `cyrillic` (East Slavic model first — better for a Russian reader). Only used while `ocr_language` is left empty. |
 | `multimodal_models` | empty | Multimodal allowlist (comma separated): these models receive images directly without degradation. |
+| `native_vision_auto` | `true` | Trust the harness model metadata (`inputModalities`) to decide whether the active model sees images natively. For a native model the prompt stops steering it to `image_scan` and image blocks pass through instead of being downgraded. Unchecked returns to the `multimodal_models` whitelist alone. |
 | `request_guard` | `true` | Request guard — last-resort image block degradation on llm/stream. |
 | `batch_probe_first` | `3` | How many leading images `image_batch` probes to decide whether a batch is text-dense. |
 | `batch_ocr_limit_chars` | `800` | Per-image OCR excerpt length in `image_batch`. |

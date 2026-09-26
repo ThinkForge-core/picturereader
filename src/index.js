@@ -35,7 +35,16 @@ import { readConfig } from './config.js';
 import z from '@deepseek-ai/schemastery';
 import { setRuntimeSource, getRuntimeConfig } from './runtime.js';
 import { attachImageBridge } from './bridge.js';
-import { registerTwinAdapters, refreshTwinAdapters } from './picturereader-vision.mjs';
+import { registerTwinAdapters, refreshTwinAdapters, realAdapterOf } from './picturereader-vision.mjs';
+import {
+  CAPABILITY_SECTION_NAME,
+  CAPABILITY_SECTION_ORDER,
+  capabilitySectionText,
+  noteActiveModel,
+  noteAgentModel,
+  setCapability,
+  verdictFromModalities,
+} from './vision-capability.js';
 import { writeFile, readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
@@ -259,6 +268,10 @@ export const Config = z.object({
     .boolean()
     .default(false)
     .description('Advanced: debug logging.')),
+  native_vision_auto: live(z
+    .boolean()
+    .default(true)
+    .description('Advanced: trust the harness model metadata (inputModalities) to decide whether the active model sees images natively. When it does, the prompt stops steering the model to image_scan and image blocks pass straight to it instead of being downgraded.')),
 });
 
 /** Services required at runtime. */
@@ -344,7 +357,50 @@ export function apply(ctx, config) {
     ctx.logger?.warn?.(`[picturereader] settings presentation not configured: ${String(error)}`);
   }
 
-  // ── 模型扫描 + 视觉孪生路由（llm 已在顶层 inject 中声明）──
+  // ── Active-model tracking ──
+  // Every turn the harness writes the selected provider/model into
+  // assembly.variables (installModelSelection); that is the most authoritative
+  // answer to "which model is this turn actually using". The capability section
+  // below is assembled synchronously, so it reads the agent-level cache kept
+  // here.
+  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    const out = await next();
+    try {
+      const vars = out?.variables ?? {};
+      const agent = context?.agent;
+      const provider = (typeof vars.provider === 'string' && vars.provider) || agent?.options?.provider || '';
+      const model = (typeof vars.model === 'string' && vars.model) || agent?.options?.model || '';
+      if (provider || model) {
+        noteActiveModel(provider, model);
+        if (agent) noteAgentModel(agent, provider, model);
+      }
+    } catch { /* tracking must never break prompt assembly */ }
+    return out;
+  }, { global: true });
+
+  // ── System prompt: a natively sighted model is told not to reach for image_scan ──
+  // Soft injection (not a module-level `inject` entry): on a host without the
+  // systemPrompt service the rest of the plugin must keep working.
+  try {
+    ctx.inject(['systemPrompt'], (sctx) => {
+      const registry = sctx.systemPrompt;
+      if (!registry || typeof registry.section !== 'function') return;
+      ctx.effect(
+        () => registry.section({
+          name: CAPABILITY_SECTION_NAME,
+          order: CAPABILITY_SECTION_ORDER,
+          // renderPrompt drops an empty string: text-only and unknown inject nothing.
+          text: (context) => capabilitySectionText(context?.agent, context?.agent?.options, getConfig()),
+        }),
+        'picturereader: image-capability section',
+      );
+      console.log('[picturereader] registered image-capability system-prompt section');
+    });
+  } catch (error) {
+    ctx.logger?.warn?.(`[picturereader] capability section disabled: ${String(error)}`);
+  }
+
+  // ── Model scan + vision twin routing (llm is declared in the top-level inject) ──
   ctx.inject(['llm'], (sctx) => {
     const llm = sctx.llm;
     // DSH 0.1.7 removed the settings service's `register()`: a plugin's profile
@@ -369,12 +425,29 @@ export function apply(ctx, config) {
         const providers = llm.listProviders();
         const textModels = [];
         for (const p of providers) {
+          // ⚠️ 能力判定必须用**未包装的原始 adapter**（realAdapterOf）：孪生会把
+          // 被勾选模型的 inputModalities 改写成 ['text','image']，直接走
+          // llm.listModels() 会把"伪识图（孪生）"误判成"真·原生识图"。
+          // 拿不到原始 adapter 时宁可不写能力缓存（保持 unknown），也不用可能
+          // 被污染的数据。
+          const adapter = realAdapterOf(llm, p.id);
           try {
-            const models = await llm.listModels(p.id);
-            for (const m of models) {
-              const mods = m.inputModalities || [];
-              if (!mods.includes('image')) {
-                textModels.push({ provider: p.id, id: m.id, name: m.name || m.id });
+            if (adapter && typeof adapter.listModels === 'function') {
+              const models = await adapter.listModels(p.id);
+              for (const m of models) {
+                setCapability(p.id, m.id, verdictFromModalities(m.inputModalities), 'startup-scan');
+                const mods = m.inputModalities || [];
+                if (!mods.includes('image')) {
+                  textModels.push({ provider: p.id, id: m.id, name: m.name || m.id });
+                }
+              }
+            } else {
+              const models = await llm.listModels(p.id);
+              for (const m of models) {
+                const mods = m.inputModalities || [];
+                if (!mods.includes('image')) {
+                  textModels.push({ provider: p.id, id: m.id, name: m.name || m.id });
+                }
               }
             }
           } catch { /* 跳过 */ }
